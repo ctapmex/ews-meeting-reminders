@@ -1,0 +1,16 @@
+# Binaries / build
+/ews-reminders
+/bin/
+/data/
+
+# Local secrets — never commit
+config.yaml
+config.toml
+.env
+*.env
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store

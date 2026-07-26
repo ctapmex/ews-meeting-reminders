@@ -1,0 +1,70 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+      - '[0-9]+.[0-9]+.[0-9]+*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Resolve version
+        id: ver
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          FILE_VERSION="$(tr -d '[:space:]' < VERSION)"
+          if [[ "${VERSION}" != "${FILE_VERSION}" ]]; then
+            echo "Tag version (${VERSION}) does not match VERSION file (${FILE_VERSION})" >&2
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "archive=ews-meeting-reminders-${VERSION}-linux-amd64" >> "$GITHUB_OUTPUT"
+
+      - name: Test
+        run: make test
+
+      - name: Build
+        run: |
+          make build \
+            VERSION="${{ steps.ver.outputs.version }}" \
+            COMMIT="$(git rev-parse --short HEAD)" \
+            BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          ./bin/ews-reminders -version
+
+      - name: Pack archive
+        run: |
+          NAME="${{ steps.ver.outputs.archive }}"
+          mkdir -p "dist/${NAME}/systemd"
+          install -m 0755 bin/ews-reminders "dist/${NAME}/ews-reminders"
+          install -m 0644 config.example.yaml "dist/${NAME}/config.example.yaml"
+          install -m 0644 LICENSE "dist/${NAME}/LICENSE"
+          install -m 0644 README.md "dist/${NAME}/README.md"
+          install -m 0644 systemd/ews-meeting-reminders.service \
+            "dist/${NAME}/systemd/ews-meeting-reminders.service"
+          printf '%s\n' "${{ steps.ver.outputs.version }}" > "dist/${NAME}/VERSION"
+          tar -C dist -czf "dist/${NAME}.tar.gz" "${NAME}"
+          (cd dist && sha256sum "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256")
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: ${{ steps.ver.outputs.version }}
+          generate_release_notes: true
+          files: |
+            dist/${{ steps.ver.outputs.archive }}.tar.gz
+            dist/${{ steps.ver.outputs.archive }}.tar.gz.sha256

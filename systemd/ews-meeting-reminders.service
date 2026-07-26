@@ -1,0 +1,14 @@
+[Unit]
+Description=EWS meeting reminders
+After=network-online.target graphical-session.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/ews-meeting-reminders/ews-reminders
+Restart=on-failure
+RestartSec=20
+EnvironmentFile=-%h/.config/ews-meeting-reminders/env
+
+[Install]
+WantedBy=default.target

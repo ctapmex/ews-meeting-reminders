@@ -1,0 +1,38 @@
+# Copy to ~/.config/ews-meeting-reminders/config.yaml
+# Secret: export EWS_PASSWORD=... or put password below.
+
+ews:
+  server: "https://mail.company.com/EWS/Exchange.asmx"
+  email: "you@company.com"
+  # DOMAIN\user or user@company.com; empty = use email
+  username: ""
+  password: ""
+  # ntlm (typical on-prem) | basic
+  auth: ntlm
+  verify_ssl: true
+
+reminders:
+  offsets_minutes: [5, 0]
+  poll_seconds: 30
+  # EWS MyResponseType: Accept | Organizer | Tentative | Decline | NoResponseReceived | Unknown
+  include_response_types: [Accept, Organizer, Tentative]
+  lookahead_hours: 12
+  grace_after_seconds: 90
+  # How long to keep shown-notification records in the state file.
+  # Every poll pass prunes entries older than this. Default: 24h.
+  state_keep_hours: 24
+
+notify:
+  app_name: "Встречи Exchange"
+  urgency: critical
+  open_action_label: "Открыть ссылку"
+  skip_action_label: "Пропустить"
+  skip_all_action_label: "Пропустить все"
+  # Command to open join URLs; URL is appended as the last argument.
+  # Example: "xterm -e xdg-open"
+  open_url_cmd: xdg-open
+  join_hosts:
+    - "*.ktalk.ru"
+    - trueconf.x.com
+    - zoom.us
+    - "*.zoom.us"
