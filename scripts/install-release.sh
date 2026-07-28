@@ -10,7 +10,7 @@ SERVICE="ews-meeting-reminders.service"
 
 BIN_SRC="$ROOT/ews-reminders"
 CFG_SRC="$ROOT/config.example.yaml"
-UNIT_SRC="$ROOT/systemd/$SERVICE"
+UNIT_SRC="$ROOT/$SERVICE"
 
 if [[ ! -x "$BIN_SRC" ]]; then
   echo "ERROR: $BIN_SRC not found or not executable" >&2

@@ -54,6 +54,12 @@ journalctl --user -u ews-meeting-reminders.service -f
 
 Сервис рассчитан на сессию после входа в графику.
 
+Удаление (конфиг и `env` не трогает):
+
+```bash
+./uninstall
+```
+
 ## Установка из исходников
 
 Требуется Go 1.26+. Все операции установки из исходников выполняются через `Makefile`.
@@ -195,9 +201,8 @@ VERSION                  # semver релиза
 cmd/ews-reminders/       # демон / -list / -once
 cmd/ews-test-notify/     # smoke-test уведомлений
 internal/                # app, config, ews, joinurl, notify, state, version
-systemd/                 # user unit
+scripts/                 # install / uninstall / user systemd unit
 Dockerfile               # сборка статического бинарника
-install-release.sh       # установка из распакованного релизного архива
 config.example.yaml
 LICENSE
 ```

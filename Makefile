@@ -83,7 +83,7 @@ install: build
 		echo "Created $(CONFIG_DIR)/config.yaml — edit credentials, then:"; \
 		echo "  echo 'EWS_PASSWORD=...' > $(CONFIG_DIR)/env && chmod 600 $(CONFIG_DIR)/env"; \
 	fi
-	install -m 0644 systemd/ews-meeting-reminders.service "$(UNIT_DIR)/$(SERVICE)"
+	install -m 0644 scripts/ews-meeting-reminders.service "$(UNIT_DIR)/$(SERVICE)"
 	systemctl --user daemon-reload
 	systemctl --user enable --now "$(SERVICE)"
 	@echo "OK: $(SHARE)/ews-reminders"

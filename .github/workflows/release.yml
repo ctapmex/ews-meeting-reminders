@@ -48,14 +48,15 @@ jobs:
       - name: Pack archive
         run: |
           NAME="${{ steps.ver.outputs.archive }}"
-          mkdir -p "dist/${NAME}/systemd"
-          install -m 0755 install-release.sh "dist/${NAME}/install"
+          mkdir -p "dist/${NAME}"
+          install -m 0755 scripts/install-release.sh "dist/${NAME}/install"
+          install -m 0755 scripts/uninstall-release.sh "dist/${NAME}/uninstall"
           install -m 0755 bin/ews-reminders "dist/${NAME}/ews-reminders"
           install -m 0644 config.example.yaml "dist/${NAME}/config.example.yaml"
           install -m 0644 LICENSE "dist/${NAME}/LICENSE"
           install -m 0644 README.md "dist/${NAME}/README.md"
-          install -m 0644 systemd/ews-meeting-reminders.service \
-            "dist/${NAME}/systemd/ews-meeting-reminders.service"
+          install -m 0644 scripts/ews-meeting-reminders.service \
+            "dist/${NAME}/ews-meeting-reminders.service"
           printf '%s\n' "${{ steps.ver.outputs.version }}" > "dist/${NAME}/VERSION"
           tar -C dist -czf "dist/${NAME}.tar.gz" "${NAME}"
           (cd dist && sha256sum "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256")
