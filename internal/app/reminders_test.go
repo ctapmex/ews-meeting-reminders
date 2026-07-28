@@ -95,3 +95,25 @@ func TestCollectDueReminders_OnlyOneInWindowAmongThree(t *testing.T) {
 		t.Fatalf("want only soon@5, got %+v", due)
 	}
 }
+
+func TestFormatNotification_NoDuplicateCountdown(t *testing.T) {
+	start := time.Date(2026, 7, 27, 12, 20, 0, 0, time.Local)
+	m := ews.Meeting{
+		Subject:  "Standup",
+		Start:    start,
+		Location: "https://trueconf.nexign.com/c/1",
+		JoinURL:  "https://trueconf.nexign.com/c/1",
+	}
+	title, body := formatNotification(m, 5)
+	if title != "Через 5 мин: Standup" {
+		t.Fatalf("title: %q", title)
+	}
+	wantBody := "12:20\nhttps://trueconf.nexign.com/c/1"
+	if body != wantBody {
+		t.Fatalf("body: %q want %q", body, wantBody)
+	}
+	title0, body0 := formatNotification(ews.Meeting{Subject: "X", Start: start}, 0)
+	if title0 != "Начало: X" || body0 != "12:20" {
+		t.Fatalf("offset 0: title=%q body=%q", title0, body0)
+	}
+}

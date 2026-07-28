@@ -37,10 +37,8 @@ type Item struct {
 }
 
 type Notifier struct {
-	opts       Options
-	conn       *dbus.Conn
-	pendingMu  sync.Mutex
-	pendingURL map[uint32]string
+	opts Options
+	conn *dbus.Conn
 
 	inbox      chan Item
 	stop       chan struct{}
@@ -56,11 +54,10 @@ func New(opts Options) (*Notifier, error) {
 		return nil, fmt.Errorf("session bus: %w (need DBUS_SESSION_BUS_ADDRESS)", err)
 	}
 	n := &Notifier{
-		opts:       opts,
-		conn:       conn,
-		pendingURL: map[uint32]string{},
-		inbox:      make(chan Item, 128),
-		stop:       make(chan struct{}),
+		opts:  opts,
+		conn:  conn,
+		inbox: make(chan Item, 128),
+		stop:  make(chan struct{}),
 	}
 	n.waitPer.Store(int64(opts.WaitPerItem))
 
@@ -79,7 +76,6 @@ func New(opts Options) (*Notifier, error) {
 		return nil, err
 	}
 
-	go n.listenActions()
 	n.wg.Add(1)
 	go n.presenter()
 	return n, nil
@@ -175,54 +171,25 @@ func (n *Notifier) presenter() {
 			wait := time.Duration(n.waitPer.Load())
 			log.Printf("notify: showing id=%d url=%q inbox=%d wait=%s", id, item.URL, pendingAfter, wait)
 			action, _ := n.waitOn(sigCh, id, wait)
-			if action == "skip_all" {
+			switch action {
+			case "open":
+				if item.URL != "" {
+					if err := OpenURL(item.URL, n.opts.OpenURLCmd); err != nil {
+						log.Printf("notify: open url %q: %v", item.URL, err)
+					} else {
+						log.Printf("notify: opened %s", item.URL)
+					}
+				} else {
+					log.Printf("notify: open action but no url for id=%d", id)
+				}
+			case "skip_all":
 				dropped := n.drainInbox()
 				log.Printf("notify: skip_all — dropped %d queued", dropped)
-			} else {
+			default:
 				log.Printf("notify: done action=%q → continue", action)
 			}
-			n.pendingMu.Lock()
-			delete(n.pendingURL, id)
-			n.pendingMu.Unlock()
 			n.presenting.Store(false)
 			n.queued.Add(-1)
-		}
-	}
-}
-
-func (n *Notifier) listenActions() {
-	ch := make(chan *dbus.Signal, 16)
-	n.conn.Signal(ch)
-	for {
-		select {
-		case <-n.stop:
-			return
-		case sig, ok := <-ch:
-			if !ok {
-				return
-			}
-			if sig.Name != "org.freedesktop.Notifications.ActionInvoked" {
-				continue
-			}
-			if len(sig.Body) < 2 {
-				continue
-			}
-			id, _ := sig.Body[0].(uint32)
-			action, _ := sig.Body[1].(string)
-			if action != "open" {
-				continue
-			}
-			n.pendingMu.Lock()
-			url := n.pendingURL[id]
-			delete(n.pendingURL, id)
-			n.pendingMu.Unlock()
-			if url == "" {
-				continue
-			}
-			log.Printf("notify: opening %s", url)
-			if err := OpenURL(url, n.opts.OpenURLCmd); err != nil {
-				log.Printf("notify: open url: %v", err)
-			}
 		}
 	}
 }
@@ -336,11 +303,6 @@ func (n *Notifier) show(title, body, joinURL string, replaces uint32, withSkip, 
 	if err := call.Store(&id); err != nil {
 		return 0, err
 	}
-	if joinURL != "" {
-		n.pendingMu.Lock()
-		n.pendingURL[id] = joinURL
-		n.pendingMu.Unlock()
-	}
 	return id, nil
 }
 
@@ -361,7 +323,20 @@ func OpenURL(url, openCmd string) error {
 		return err
 	}
 	cmd := exec.Command(parts[0], append(parts[1:], url)...)
-	return cmd.Start()
+	// Detach from the service process group so the browser keeps running
+	// after the child exits and inherits the desktop session when possible.
+	cmd.Stdin = nil
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start %q: %w", cmd.Path, err)
+	}
+	go func() {
+		if err := cmd.Wait(); err != nil {
+			log.Printf("notify: %s exited: %v", cmd.Path, err)
+		}
+	}()
+	return nil
 }
 
 // splitOpenCmd splits a command string like "xterm -e xdg-open" into parts,

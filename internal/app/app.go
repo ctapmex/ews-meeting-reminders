@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -163,7 +164,7 @@ func RunTestNotify(opts TestNotifyOptions) error {
 			Location: u,
 			JoinURL:  u,
 		}
-		title, body := formatNotification(m, 5, now)
+		title, body := formatNotification(m, 5)
 		items = append(items, notify.Item{Title: title, Body: body, URL: u})
 		fmt.Fprintf(os.Stderr, "[%d/%d] %s\n  url: %s\n", i+1, count, title, u)
 	}
@@ -218,7 +219,7 @@ func processOnce(client *ews.Client, cfg *config.Settings, store *state.Store, n
 
 	items := make([]notify.Item, 0, len(due))
 	for _, d := range due {
-		title, body := formatNotification(d.Meeting, d.Offset, now)
+		title, body := formatNotification(d.Meeting, d.Offset)
 		items = append(items, notify.Item{Title: title, Body: body, URL: d.Meeting.JoinURL, Key: d.Key})
 		log.Printf("queued %q offset=%d url=%q", d.Meeting.Subject, d.Offset, d.Meeting.JoinURL)
 	}
@@ -235,34 +236,24 @@ func shouldFire(start time.Time, offsetMin int, now time.Time, graceAfter int) b
 	return remaining > (threshold-float64(graceAfter)) && remaining <= threshold
 }
 
-func formatNotification(m ews.Meeting, offsetMin int, now time.Time) (title, body string) {
+// formatNotification builds one reminder card: title carries the offset label,
+// body is only start clock + place/URL (no second "через N минут" — GNOME shows
+// summary and body as two peer lines and that looked like two meetings).
+func formatNotification(m ews.Meeting, offsetMin int) (title, body string) {
 	if offsetMin == 0 {
 		title = "Начало: " + m.Subject
 	} else {
 		title = fmt.Sprintf("Через %d мин: %s", offsetMin, m.Subject)
 	}
-	body = formatWhen(m.Start, now)
-	if m.Location != "" {
-		body += "\n" + m.Location
-	} else if m.JoinURL != "" {
-		body += "\n" + m.JoinURL
+	body = m.Start.Format("15:04")
+	extra := strings.TrimSpace(m.Location)
+	if extra == "" {
+		extra = m.JoinURL
+	}
+	if extra != "" {
+		body += "\n" + extra
 	}
 	return title, body
-}
-
-func formatWhen(start, now time.Time) string {
-	delta := int(start.Sub(now).Minutes())
-	clock := start.Format("15:04")
-	switch {
-	case delta <= 0:
-		return fmt.Sprintf("сейчас (%s)", clock)
-	case delta == 1:
-		return fmt.Sprintf("через 1 минуту (%s)", clock)
-	case delta < 5:
-		return fmt.Sprintf("через %d минуты (%s)", delta, clock)
-	default:
-		return fmt.Sprintf("через %d минут (%s)", delta, clock)
-	}
 }
 
 func notifyOptions(cfg *config.Settings, store *state.Store) notify.Options {
