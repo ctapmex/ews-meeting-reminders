@@ -26,7 +26,7 @@ SERVICE    ?= ews-meeting-reminders.service
 
 BINARIES := $(OUT_DIR)/ews-reminders $(OUT_DIR)/ews-test-notify
 
-.PHONY: all help build clean test install docker-build ews-reminders ews-test-notify
+.PHONY: all help build clean test install docker-build ews-reminders ews-test-notify FORCE
 
 all: build
 
@@ -43,17 +43,19 @@ build: $(BINARIES)
 ews-reminders: $(OUT_DIR)/ews-reminders
 ews-test-notify: $(OUT_DIR)/ews-test-notify
 
-$(OUT_DIR)/ews-reminders:
+$(OUT_DIR)/ews-reminders: FORCE
 	@mkdir -p $(OUT_DIR)
 	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(GOOS) GOARCH=$(GOARCH) \
 		$(GO) build -trimpath -ldflags="$(LDFLAGS)" \
 		-o $(OUT_DIR)/ews-reminders ./cmd/ews-reminders
 
-$(OUT_DIR)/ews-test-notify:
+$(OUT_DIR)/ews-test-notify: FORCE
 	@mkdir -p $(OUT_DIR)
 	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(GOOS) GOARCH=$(GOARCH) \
 		$(GO) build -trimpath -ldflags="$(LDFLAGS)" \
 		-o $(OUT_DIR)/ews-test-notify ./cmd/ews-test-notify
+
+FORCE:
 
 test:
 	$(GO) test ./...
