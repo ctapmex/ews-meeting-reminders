@@ -15,6 +15,16 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
 	log.SetPrefix("ews-reminders: ")
 
+	flag.Usage = func() {
+		out := flag.CommandLine.Output()
+		fmt.Fprintln(out, "ews-reminders - Linux daemon for MS Exchange (EWS) meeting reminders.")
+		fmt.Fprintln(out, "Repository: https://github.com/ctapmex/ews-meeting-reminders")
+		fmt.Fprintf(out, "Version: %s\n", version.String())
+		fmt.Fprintln(out)
+		fmt.Fprintf(out, "Usage of %s:\n", os.Args[0])
+		flag.PrintDefaults()
+	}
+
 	configPath := flag.String("config", config.DefaultConfigPath(), "path to config.yaml")
 	statePath := flag.String("state", config.DefaultStatePath(), "path to shown.json state")
 	once := flag.Bool("once", false, "single poll then exit")
