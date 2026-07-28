@@ -1,7 +1,7 @@
 # Build static ews-reminders binary (no runtime image).
 # Extract:
 #   docker build --target export --output type=local,dest=./bin .
-# Or: ./docker-build.sh
+# Or: make docker-build
 FROM golang:bookworm AS build
 ARG VERSION=dev
 ARG COMMIT=unknown

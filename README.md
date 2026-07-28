@@ -24,30 +24,25 @@
 
 ## Установка из релиза
 
-Архив релиза: `ews-meeting-reminders-<версия>-linux-amd64.tar.gz` (бинарник, пример конфига, unit, LICENSE, README).
+1. Скачайте `*.tar.gz` из [Releases](https://github.com/adobrunov/ews-meeting-reminders/releases).
+2. Распакуйте архив.
+3. В распакованной папке выполните:
 
 ```bash
-VERSION=0.1.0   # подставьте версию из релиза
-ARCHIVE=ews-meeting-reminders-${VERSION}-linux-amd64
-# скачайте и распакуйте ARCHIVE.tar.gz
+./install
+```
 
-install -d ~/.local/share/ews-meeting-reminders \
-           ~/.config/ews-meeting-reminders \
-           ~/.config/systemd/user
+Скрипт сам:
+- установит бинарник и user unit в нужные директории в пределах домашней папки;
+- при первом запуске создаст `~/.config/ews-meeting-reminders/config.yaml` если его еще нет;
+- при обновлении остановит сервис, заменит бинарник и запустит сервис снова.
 
-install -m 0755 "${ARCHIVE}/ews-reminders" \
-  ~/.local/share/ews-meeting-reminders/ews-reminders
-install -m 0600 "${ARCHIVE}/config.example.yaml" \
-  ~/.config/ews-meeting-reminders/config.yaml
-install -m 0644 "${ARCHIVE}/systemd/ews-meeting-reminders.service" \
-  ~/.config/systemd/user/ews-meeting-reminders.service
+После первой установки заполните параметры `server / email / username` в `~/.config/ews-meeting-reminders/config.yaml`, затем:
 
-# заполните server / email / username в config.yaml
+```bash
 echo 'EWS_PASSWORD=секрет' > ~/.config/ews-meeting-reminders/env
 chmod 600 ~/.config/ews-meeting-reminders/env
-
-systemctl --user daemon-reload
-systemctl --user enable --now ews-meeting-reminders.service
+systemctl --user restart ews-meeting-reminders.service
 ```
 
 Проверка:
@@ -61,20 +56,20 @@ journalctl --user -u ews-meeting-reminders.service -f
 
 ## Установка из исходников
 
-Нужен Go 1.26+. Скрипт соберёт бинарник, положит его в `~/.local/share/...`, при отсутствии конфига скопирует пример и включит user unit.
+Требуется Go 1.26+. Все операции установки из исходников выполняются через `Makefile`.
 
 ```bash
 cd ews-meeting-reminders
 
-# опционально — заранее; иначе создаст install.sh
+# опционально: создайте config.yaml заранее; иначе make install скопирует пример
 mkdir -p ~/.config/ews-meeting-reminders
 cp config.example.yaml ~/.config/ews-meeting-reminders/config.yaml
-# заполнить server / email / username
+# заполните server / email / username
 
 echo 'EWS_PASSWORD=секрет' > ~/.config/ews-meeting-reminders/env
 chmod 600 ~/.config/ews-meeting-reminders/env
 
-./install.sh
+make install
 ```
 
 ### Сборка без локального Go (Docker)
@@ -82,11 +77,11 @@ chmod 600 ~/.config/ews-meeting-reminders/env
 Только сборка бинарника; запуск всё равно на хосте:
 
 ```bash
-./docker-build.sh          # → ./bin/ews-reminders
+make docker-build          # → ./bin/ews-reminders
 ./bin/ews-reminders -version
 ```
 
-Дальше — как в разделе «из релиза» (бинарник + конфиг + unit) или вручную:
+Дальше: либо установка через релизный install-скрипт, либо ручной запуск бинарника:
 
 ```bash
 ./bin/ews-reminders -list
@@ -106,7 +101,7 @@ make build
 ./bin/ews-reminders -state /path/to/shown.json
 ```
 
-Версия — из файла `VERSION` (через `-ldflags` в Makefile / `install.sh` / `docker-build.sh`). Без `-ldflags` бинарник покажет `dev`. Релизный тег (`vX.Y.Z` или `X.Y.Z`) должен совпадать с `VERSION`.
+Версия — из файла `VERSION` (через `-ldflags` в Makefile, включая `make docker-build`). Без `-ldflags` бинарник покажет `dev`. Релизный тег (`vX.Y.Z` или `X.Y.Z`) должен совпадать с `VERSION`.
 
 ## Конфигурация
 
@@ -202,8 +197,7 @@ cmd/ews-test-notify/     # smoke-test уведомлений
 internal/                # app, config, ews, joinurl, notify, state, version
 systemd/                 # user unit
 Dockerfile               # сборка статического бинарника
-docker-build.sh
-install.sh               # сборка + установка user service
+install-release.sh       # установка из распакованного релизного архива
 config.example.yaml
 LICENSE
 ```

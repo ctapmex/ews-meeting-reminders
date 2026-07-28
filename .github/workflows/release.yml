@@ -49,6 +49,7 @@ jobs:
         run: |
           NAME="${{ steps.ver.outputs.archive }}"
           mkdir -p "dist/${NAME}/systemd"
+          install -m 0755 install-release.sh "dist/${NAME}/install"
           install -m 0755 bin/ews-reminders "dist/${NAME}/ews-reminders"
           install -m 0644 config.example.yaml "dist/${NAME}/config.example.yaml"
           install -m 0644 LICENSE "dist/${NAME}/LICENSE"
