@@ -142,7 +142,7 @@ make build
 ### Ссылка на подключение
 
 1. **Location** — любой `http://` / `https://` URL → ссылка на подключение (домен не фильтруется).
-2. Иначе **Body** — первый URL, чей hostname совпадает с `notify.join_hosts`.
+2. Иначе **Body** (через отдельный EWS `GetItem`, т.к. `FindItem` тело не отдаёт) — первый URL, чей hostname совпадает с `notify.join_hosts`.
 3. Если ссылки нет — кнопки «Открыть ссылку» нет.
 
 ### `notify.join_hosts`

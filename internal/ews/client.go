@@ -17,6 +17,8 @@ import (
 	"github.com/Azure/go-ntlmssp"
 )
 
+const getItemBatchSize = 50
+
 type Meeting struct {
 	ID       string
 	Subject  string
@@ -53,6 +55,9 @@ func New(endpoint, email, username, password, auth string, verifySSL bool, joinH
 			next:     ntlmssp.Negotiator{RoundTripper: transport},
 		}
 	}
+	// http.Client.CloseIdleConnections only reaches Transport if it implements
+	// CloseIdleConnections; auth wrappers otherwise swallow it (no-op).
+	rt = &idleCloseRoundTripper{RoundTripper: rt, idle: transport}
 
 	return &Client{
 		endpoint:   endpoint,
@@ -61,6 +66,15 @@ func New(endpoint, email, username, password, auth string, verifySSL bool, joinH
 		joinHosts:  joinHosts,
 		include:    include,
 	}
+}
+
+type idleCloseRoundTripper struct {
+	http.RoundTripper
+	idle interface{ CloseIdleConnections() }
+}
+
+func (r *idleCloseRoundTripper) CloseIdleConnections() {
+	r.idle.CloseIdleConnections()
 }
 
 type basicAuthRoundTripper struct {
@@ -85,16 +99,78 @@ func (n *ntlmAuthRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 	return n.next.RoundTrip(req2)
 }
 
+type itemRef struct {
+	ID, ChangeKey string
+}
+
 func (c *Client) CalendarView(start, end time.Time) ([]Meeting, error) {
-	body := buildFindItem(c.email, start, end)
-	raw, err := c.doSOAP("FindItem", body)
+	raw, err := c.doSOAP("FindItem", buildFindItem(c.email, start, end), true)
+	if err != nil {
+		return nil, fmt.Errorf("FindItem: %w", err)
+	}
+	meetings, refs, err := parseFindItem(raw, c.joinHosts, c.include)
 	if err != nil {
 		return nil, err
 	}
-	return parseFindItem(raw, c.joinHosts, c.include)
+	need := make([]itemRef, 0, len(refs))
+	for i, m := range meetings {
+		if m.JoinURL != "" {
+			continue
+		}
+		ref, ok := refs[i]
+		if !ok || ref.ID == "" {
+			continue
+		}
+		need = append(need, ref)
+	}
+	if len(need) == 0 {
+		return meetings, nil
+	}
+	// Fresh TCP/TLS+NTLM handshake: reused keep-alive conns often EOF on the next EWS call.
+	c.httpClient.CloseIdleConnections()
+	bodies, err := c.fetchBodies(need)
+	if err != nil {
+		return nil, fmt.Errorf("GetItem: %w", err)
+	}
+	for i := range meetings {
+		if meetings[i].JoinURL != "" {
+			continue
+		}
+		body, ok := bodies[meetings[i].ID]
+		if !ok || body == "" {
+			continue
+		}
+		meetings[i].JoinURL = joinurl.Extract(meetings[i].Location, body, c.joinHosts)
+	}
+	return meetings, nil
 }
 
-func (c *Client) doSOAP(action, body string) ([]byte, error) {
+func (c *Client) fetchBodies(refs []itemRef) (map[string]string, error) {
+	out := make(map[string]string, len(refs))
+	for i := 0; i < len(refs); i += getItemBatchSize {
+		if i > 0 {
+			c.httpClient.CloseIdleConnections()
+		}
+		end := i + getItemBatchSize
+		if end > len(refs) {
+			end = len(refs)
+		}
+		raw, err := c.doSOAP("GetItem", buildGetItem(refs[i:end]), false)
+		if err != nil {
+			return nil, err
+		}
+		part, err := parseGetItemBodies(raw)
+		if err != nil {
+			return nil, err
+		}
+		for id, body := range part {
+			out[id] = body
+		}
+	}
+	return out, nil
+}
+
+func (c *Client) doSOAP(action, body string, failOnErrorClass bool) ([]byte, error) {
 	req, err := http.NewRequest(http.MethodPost, c.endpoint, strings.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -117,7 +193,7 @@ func (c *Client) doSOAP(action, body string) ([]byte, error) {
 		}
 		return nil, fmt.Errorf("ews HTTP %s: %s", resp.Status, snippet)
 	}
-	if bytes.Contains(data, []byte("ResponseClass=\"Error\"")) || bytes.Contains(data, []byte("ResponseClass='Error'")) {
+	if failOnErrorClass && (bytes.Contains(data, []byte("ResponseClass=\"Error\"")) || bytes.Contains(data, []byte("ResponseClass='Error'"))) {
 		snippet := string(data)
 		if len(snippet) > 800 {
 			snippet = snippet[:800]
@@ -135,6 +211,7 @@ func buildFindItem(email string, start, end time.Time) string {
             <t:EmailAddress>%s</t:EmailAddress>
           </t:Mailbox>`, xmlEscape(email))
 	}
+	// FindItem does not return item:Body (EWS limitation). Body is loaded via GetItem.
 	return fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
 <soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
   xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages"
@@ -147,10 +224,8 @@ func buildFindItem(email string, start, end time.Time) string {
     <m:FindItem Traversal="Shallow">
       <m:ItemShape>
         <t:BaseShape>IdOnly</t:BaseShape>
-        <t:BodyType>HTML</t:BodyType>
         <t:AdditionalProperties>
           <t:FieldURI FieldURI="item:Subject"/>
-          <t:FieldURI FieldURI="item:Body"/>
           <t:FieldURI FieldURI="calendar:Start"/>
           <t:FieldURI FieldURI="calendar:Location"/>
           <t:FieldURI FieldURI="calendar:IsCancelled"/>
@@ -165,6 +240,39 @@ func buildFindItem(email string, start, end time.Time) string {
     </m:FindItem>
   </soap:Body>
 </soap:Envelope>`, start.UTC().Format(time.RFC3339), end.UTC().Format(time.RFC3339), mailbox)
+}
+
+func buildGetItem(refs []itemRef) string {
+	var ids strings.Builder
+	for _, r := range refs {
+		if r.ChangeKey != "" {
+			fmt.Fprintf(&ids, "\n        <t:ItemId Id=\"%s\" ChangeKey=\"%s\"/>", xmlEscape(r.ID), xmlEscape(r.ChangeKey))
+		} else {
+			fmt.Fprintf(&ids, "\n        <t:ItemId Id=\"%s\"/>", xmlEscape(r.ID))
+		}
+	}
+	return fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages"
+  xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types"
+  xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Header>
+    <t:RequestServerVersion Version="Exchange2013_SP1"/>
+  </soap:Header>
+  <soap:Body>
+    <m:GetItem>
+      <m:ItemShape>
+        <t:BaseShape>IdOnly</t:BaseShape>
+        <t:BodyType>HTML</t:BodyType>
+        <t:AdditionalProperties>
+          <t:FieldURI FieldURI="item:Body"/>
+        </t:AdditionalProperties>
+      </m:ItemShape>
+      <m:ItemIds>%s
+      </m:ItemIds>
+    </m:GetItem>
+  </soap:Body>
+</soap:Envelope>`, ids.String())
 }
 
 func xmlEscape(s string) string {
@@ -192,9 +300,28 @@ type findItemDoc struct {
 	} `xml:"Body"`
 }
 
+type getItemDoc struct {
+	XMLName xml.Name `xml:"Envelope"`
+	Body    struct {
+		GetItemResponse struct {
+			ResponseMessages struct {
+				GetItemResponseMessage []struct {
+					ResponseClass string `xml:"ResponseClass,attr"`
+					MessageText   string `xml:"MessageText"`
+					Items         struct {
+						CalendarItems []calendarItem `xml:"CalendarItem"`
+						Items         []calendarItem `xml:"Item"`
+					} `xml:"Items"`
+				} `xml:"GetItemResponseMessage"`
+			} `xml:"ResponseMessages"`
+		} `xml:"GetItemResponse"`
+	} `xml:"Body"`
+}
+
 type calendarItem struct {
 	ItemID struct {
-		ID string `xml:"Id,attr"`
+		ID        string `xml:"Id,attr"`
+		ChangeKey string `xml:"ChangeKey,attr"`
 	} `xml:"ItemId"`
 	Subject        string `xml:"Subject"`
 	Body           string `xml:"Body"`
@@ -221,17 +348,19 @@ func stripXMLNS(data []byte) []byte {
 	return []byte(s)
 }
 
-func parseFindItem(data []byte, joinHosts []string, include map[string]struct{}) ([]Meeting, error) {
+// parseFindItem returns meetings and ItemId refs keyed by meeting index (for GetItem).
+func parseFindItem(data []byte, joinHosts []string, include map[string]struct{}) ([]Meeting, map[int]itemRef, error) {
 	cleaned := stripXMLNS(data)
 	var doc findItemDoc
 	if err := xml.Unmarshal(cleaned, &doc); err != nil {
-		return nil, fmt.Errorf("parse FindItem: %w", err)
+		return nil, nil, fmt.Errorf("parse FindItem: %w", err)
 	}
 	msg := doc.Body.FindItemResponse.ResponseMessages.FindItemResponseMessage
 	if msg.ResponseClass == "Error" {
-		return nil, fmt.Errorf("FindItem: %s", msg.MessageText)
+		return nil, nil, fmt.Errorf("FindItem: %s", msg.MessageText)
 	}
 	var out []Meeting
+	refs := make(map[int]itemRef)
 	for _, it := range msg.RootFolder.Items.CalendarItems {
 		if it.IsCancelled {
 			continue
@@ -257,6 +386,7 @@ func parseFindItem(data []byte, joinHosts []string, include map[string]struct{})
 		if id == "" {
 			id = subj + "|" + start.Format(time.RFC3339)
 		}
+		idx := len(out)
 		out = append(out, Meeting{
 			ID:       id,
 			Subject:  subj,
@@ -265,6 +395,33 @@ func parseFindItem(data []byte, joinHosts []string, include map[string]struct{})
 			JoinURL:  join,
 			Response: resp,
 		})
+		if it.ItemID.ID != "" {
+			refs[idx] = itemRef{ID: it.ItemID.ID, ChangeKey: it.ItemID.ChangeKey}
+		}
+	}
+	return out, refs, nil
+}
+
+func parseGetItemBodies(data []byte) (map[string]string, error) {
+	cleaned := stripXMLNS(data)
+	var doc getItemDoc
+	if err := xml.Unmarshal(cleaned, &doc); err != nil {
+		return nil, fmt.Errorf("parse GetItem: %w", err)
+	}
+	out := make(map[string]string)
+	for _, msg := range doc.Body.GetItemResponse.ResponseMessages.GetItemResponseMessage {
+		if msg.ResponseClass == "Error" {
+			log.Printf("GetItem item error: %s", msg.MessageText)
+			continue
+		}
+		items := append(msg.Items.CalendarItems, msg.Items.Items...)
+		for _, it := range items {
+			id := it.ItemID.ID
+			if id == "" {
+				continue
+			}
+			out[id] = it.Body
+		}
 	}
 	return out, nil
 }
