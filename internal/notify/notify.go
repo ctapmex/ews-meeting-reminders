@@ -16,24 +16,32 @@ type Options struct {
 	AppName            string
 	Urgency            string // low|normal|critical
 	OpenActionLabel    string
-	SkipActionLabel    string
-	SkipAllActionLabel string
+	SkipActionLabel    string // snooze
+	SkipAllActionLabel string // snooze all queued
+	StopActionLabel    string // dismiss this meeting
 	OpenURLCmd         string // command to open join URLs
 	WaitPerItem        time.Duration
 
 	// OnShown is called after a notification is actually presented.
 	OnShown func(key string)
-	// OnDropped is called for items that were skipped via "skip all"
-	// without ever being presented.
+	// OnDropped is called for items removed from the queue without being presented
+	// (e.g. drained after stop/snooze-all for another card).
 	OnDropped func(key string)
+	// OnSnooze is called when the user snoozes a presented reminder (or snooze-all).
+	// start is the meeting start time (may be zero for ad-hoc test notifications).
+	OnSnooze func(meetingID string, start time.Time)
+	// OnStop is called when the user stops reminders for a meeting.
+	OnStop func(meetingID string)
 }
 
 // Item is one meeting reminder card in a sequential queue.
 type Item struct {
-	Title string
-	Body  string
-	URL   string
-	Key   string // state key; used by OnShown/OnDropped
+	Title     string
+	Body      string
+	URL       string
+	Key       string // state key; used by OnShown/OnDropped
+	MeetingID string // meeting id for snooze/stop
+	Start     time.Time
 }
 
 type Notifier struct {
@@ -182,9 +190,26 @@ func (n *Notifier) presenter() {
 				} else {
 					log.Printf("notify: open action but no url for id=%d", id)
 				}
-			case "skip_all":
-				dropped := n.drainInbox()
-				log.Printf("notify: skip_all — dropped %d queued", dropped)
+			case "skip": // snooze
+				if item.MeetingID != "" && n.opts.OnSnooze != nil {
+					n.opts.OnSnooze(item.MeetingID, item.Start)
+				}
+				// Drop other cards for the same meeting already waiting in the
+				// inbox (e.g. a later offset enqueued while this banner sat open).
+				dropped := n.drainMeeting(item.MeetingID)
+				log.Printf("notify: snooze meeting=%q — dropped %d queued for same meeting", item.MeetingID, dropped)
+			case "stop":
+				if item.MeetingID != "" && n.opts.OnStop != nil {
+					n.opts.OnStop(item.MeetingID)
+				}
+				dropped := n.drainMeeting(item.MeetingID)
+				log.Printf("notify: stop meeting=%q — dropped %d queued for same meeting", item.MeetingID, dropped)
+			case "skip_all": // snooze all (current + queued)
+				if item.MeetingID != "" && n.opts.OnSnooze != nil {
+					n.opts.OnSnooze(item.MeetingID, item.Start)
+				}
+				dropped := n.drainInboxSnooze()
+				log.Printf("notify: snooze_all — snoozed/dropped %d queued", dropped)
 			default:
 				log.Printf("notify: done action=%q → continue", action)
 			}
@@ -205,17 +230,61 @@ func (n *Notifier) Show(title, body, joinURL string) error {
 	return nil
 }
 
-func (n *Notifier) drainInbox() int {
+// drainInboxSnooze removes all queued items, snoozing each meeting and marking keys shown.
+func (n *Notifier) drainInboxSnooze() int {
 	dropped := 0
+	seenMeetings := map[string]struct{}{}
 	for {
 		select {
 		case item := <-n.inbox:
 			dropped++
 			n.queued.Add(-1)
+			if item.MeetingID != "" {
+				if _, ok := seenMeetings[item.MeetingID]; !ok {
+					seenMeetings[item.MeetingID] = struct{}{}
+					if n.opts.OnSnooze != nil {
+						n.opts.OnSnooze(item.MeetingID, item.Start)
+					}
+				}
+			}
 			if item.Key != "" && n.opts.OnDropped != nil {
 				n.opts.OnDropped(item.Key)
 			}
 		default:
+			return dropped
+		}
+	}
+}
+
+// drainMeeting drops queued items for the same meeting (already stopped via OnStop).
+func (n *Notifier) drainMeeting(meetingID string) int {
+	if meetingID == "" {
+		return 0
+	}
+	var keep []Item
+	dropped := 0
+	for {
+		select {
+		case item := <-n.inbox:
+			if item.MeetingID == meetingID {
+				dropped++
+				n.queued.Add(-1)
+				if item.Key != "" && n.opts.OnDropped != nil {
+					n.opts.OnDropped(item.Key)
+				}
+			} else {
+				keep = append(keep, item)
+			}
+		default:
+			for _, it := range keep {
+				select {
+				case n.inbox <- it:
+				default:
+					// inbox was full of other items; shouldn't happen with buffer 128
+					log.Printf("notify: requeue failed for %q", it.Title)
+					n.queued.Add(-1)
+				}
+			}
 			return dropped
 		}
 	}
@@ -267,15 +336,18 @@ func (n *Notifier) waitOn(ch <-chan *dbus.Signal, id uint32, wait time.Duration)
 	}
 }
 
-func (n *Notifier) show(title, body, joinURL string, replaces uint32, withSkip, withSkipAll bool) (uint32, error) {
+func (n *Notifier) show(title, body, joinURL string, replaces uint32, withActions, withSkipAll bool) (uint32, error) {
 	obj := n.conn.Object("org.freedesktop.Notifications", "/org/freedesktop/Notifications")
 
 	var actions []string
 	if joinURL != "" {
 		actions = append(actions, "open", n.opts.OpenActionLabel)
 	}
-	if withSkip {
+	if withActions {
 		actions = append(actions, "skip", n.opts.SkipActionLabel)
+		if n.opts.StopActionLabel != "" {
+			actions = append(actions, "stop", n.opts.StopActionLabel)
+		}
 	}
 	if withSkipAll {
 		actions = append(actions, "skip_all", n.opts.SkipAllActionLabel)

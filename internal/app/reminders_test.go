@@ -1,10 +1,13 @@
 package app
 
 import (
+	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"ews-meeting-reminders/internal/ews"
+	"ews-meeting-reminders/internal/state"
 )
 
 func TestCollectDueReminders_TwoSimultaneousMeetings(t *testing.T) {
@@ -62,6 +65,19 @@ func TestCollectDueReminders_ThreeSimultaneousMeetings(t *testing.T) {
 	}
 }
 
+type mapGate struct {
+	seen        map[string]bool
+	dismissed   map[string]bool
+	snoozeUntil map[string]time.Time
+}
+
+func (g mapGate) Seen(key string) bool       { return g.seen[key] }
+func (g mapGate) IsDismissed(id string) bool { return g.dismissed[id] }
+func (g mapGate) SnoozeUntil(id string) (time.Time, bool) {
+	t, ok := g.snoozeUntil[id]
+	return t, ok
+}
+
 func TestCollectDueReminders_SkipsAlreadySeen(t *testing.T) {
 	now := time.Date(2026, 7, 23, 12, 0, 0, 0, time.Local)
 	meetings := []ews.Meeting{
@@ -69,10 +85,8 @@ func TestCollectDueReminders_SkipsAlreadySeen(t *testing.T) {
 		{ID: "m2", Subject: "B", Start: now.Add(5 * time.Minute)},
 		{ID: "m3", Subject: "C", Start: now.Add(5 * time.Minute)},
 	}
-	seen := map[string]bool{"m1:5": true}
-	due := collectDueReminders(meetings, []int{5}, now, 90, func(k string) bool {
-		return seen[k]
-	})
+	gate := mapGate{seen: map[string]bool{"m1:5": true}}
+	due := collectDueReminders(meetings, []int{5}, now, 90, gate)
 	if len(due) != 2 {
 		t.Fatalf("want 2 (m2,m3), got %d: %+v", len(due), due)
 	}
@@ -96,6 +110,229 @@ func TestCollectDueReminders_OnlyOneInWindowAmongThree(t *testing.T) {
 	}
 }
 
+func TestCollectDueReminders_DismissedSuppressesAll(t *testing.T) {
+	now := time.Date(2026, 7, 23, 12, 0, 0, 0, time.Local)
+	meetings := []ews.Meeting{
+		{ID: "m1", Subject: "A", Start: now.Add(5 * time.Minute)},
+		{ID: "m2", Subject: "B", Start: now.Add(5 * time.Minute)},
+	}
+	gate := mapGate{dismissed: map[string]bool{"m1": true}}
+	due := collectDueReminders(meetings, []int{5, 0}, now, 90, gate)
+	if len(due) != 1 || due[0].Meeting.ID != "m2" {
+		t.Fatalf("want only m2, got %+v", due)
+	}
+}
+
+func TestCollectDueReminders_ActiveSnoozeSuppressesOffsets(t *testing.T) {
+	now := time.Date(2026, 7, 23, 12, 0, 0, 0, time.Local)
+	meetings := []ews.Meeting{
+		{ID: "m1", Subject: "A", Start: now.Add(5 * time.Minute)},
+	}
+	gate := mapGate{snoozeUntil: map[string]time.Time{"m1": now.Add(3 * time.Minute)}}
+	due := collectDueReminders(meetings, []int{5, 0}, now, 90, gate)
+	if len(due) != 0 {
+		t.Fatalf("want no reminders while snoozed, got %+v", due)
+	}
+}
+
+func TestCollectDueReminders_ExpiredSnoozeFiresOnce(t *testing.T) {
+	now := time.Date(2026, 7, 23, 12, 0, 0, 0, time.Local)
+	until := now.Add(-1 * time.Minute)
+	meetings := []ews.Meeting{
+		{ID: "m1", Subject: "A", Start: now.Add(4 * time.Minute)},
+	}
+	gate := mapGate{snoozeUntil: map[string]time.Time{"m1": until}}
+	due := collectDueReminders(meetings, []int{5, 0}, now, 90, gate)
+	if len(due) != 1 || !due[0].Snooze {
+		t.Fatalf("want one snooze reminder, got %+v", due)
+	}
+	wantKey := state.SnoozeCycleKey("m1", until)
+	if due[0].Key != wantKey {
+		t.Fatalf("key: got %q want %q", due[0].Key, wantKey)
+	}
+}
+
+func TestCollectDueReminders_SnoozeFrom10DoesNotDoubleAt5(t *testing.T) {
+	// offsets [10,8,5,0], snooze 5m from the T-10 card:
+	//  - while waiting: no T-8
+	//  - at T-5: only the snooze follow-up (offsets 10/8/5 already marked covered)
+	//  - later T-0 still available
+	start := time.Date(2026, 7, 23, 12, 10, 0, 0, time.Local)
+	offsets := []int{10, 8, 5, 0}
+	m := ews.Meeting{ID: "m1", Subject: "A", Start: start}
+
+	t10 := start.Add(-10 * time.Minute)
+	until := t10.Add(5 * time.Minute) // T-5
+
+	dir := t.TempDir()
+	store, err := state.Open(filepath.Join(dir, "shown.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate: offset 10 was shown, user snoozed → covered offsets marked.
+	if err := store.Mark("m1:10"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetSnooze("m1", until); err != nil {
+		t.Fatal(err)
+	}
+	if err := markOffsetsCoveredBySnooze(store, "m1", start, offsets, until); err != nil {
+		t.Fatal(err)
+	}
+
+	// During wait (T-8): nothing
+	t8 := start.Add(-8 * time.Minute)
+	if due := collectDueReminders([]ews.Meeting{m}, offsets, t8, 90, store); len(due) != 0 {
+		t.Fatalf("at T-8 want 0, got %+v", due)
+	}
+
+	// At T-5: only snooze follow-up
+	t5 := until
+	due := collectDueReminders([]ews.Meeting{m}, offsets, t5, 90, store)
+	if len(due) != 1 || !due[0].Snooze {
+		t.Fatalf("at T-5 want one snooze, got %+v", due)
+	}
+
+	// After snooze delivered + cleared: no immediate offset-5 duplicate
+	if err := store.Mark(due[0].Key); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ClearSnooze("m1"); err != nil {
+		t.Fatal(err)
+	}
+	due = collectDueReminders([]ews.Meeting{m}, offsets, t5, 90, store)
+	if len(due) != 0 {
+		t.Fatalf("after snooze delivered want 0 at T-5, got %+v", due)
+	}
+
+	// At start: offset 0 still fires
+	due = collectDueReminders([]ews.Meeting{m}, offsets, start, 90, store)
+	if len(due) != 1 || due[0].Offset != 0 {
+		t.Fatalf("at start want offset 0, got %+v", due)
+	}
+}
+
+func TestMarkOffsetsCoveredBySnooze(t *testing.T) {
+	dir := t.TempDir()
+	store, err := state.Open(filepath.Join(dir, "shown.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(2026, 7, 23, 12, 10, 0, 0, time.Local)
+	until := start.Add(-5 * time.Minute)
+	if err := markOffsetsCoveredBySnooze(store, "m1", start, []int{10, 8, 5, 0}, until); err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range []int{10, 8, 5} {
+		if !store.Seen(fmt.Sprintf("m1:%d", o)) {
+			t.Fatalf("offset %d should be covered", o)
+		}
+	}
+	if store.Seen("m1:0") {
+		t.Fatal("offset 0 should remain for later")
+	}
+}
+
+func TestCollectDueReminders_SnoozeAfterStartStillFires(t *testing.T) {
+	// Offset 0 at meeting start → snooze 5m → follow-up after start is still due
+	// as long as the meeting remains in the fetched list.
+	start := time.Date(2026, 7, 23, 12, 0, 0, 0, time.Local)
+	offsets := []int{5, 0}
+	m := ews.Meeting{ID: "m1", Subject: "A", Start: start}
+
+	dir := t.TempDir()
+	store, err := state.Open(filepath.Join(dir, "shown.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Mark("m1:0"); err != nil {
+		t.Fatal(err)
+	}
+	until := start.Add(5 * time.Minute) // T+5
+	if err := store.SetSnooze("m1", until); err != nil {
+		t.Fatal(err)
+	}
+	if err := markOffsetsCoveredBySnooze(store, "m1", start, offsets, until); err != nil {
+		t.Fatal(err)
+	}
+
+	// While waiting past start: nothing
+	tPlus2 := start.Add(2 * time.Minute)
+	if due := collectDueReminders([]ews.Meeting{m}, offsets, tPlus2, 90, store); len(due) != 0 {
+		t.Fatalf("at T+2 want 0, got %+v", due)
+	}
+
+	// At T+5: snooze follow-up even though meeting already started
+	due := collectDueReminders([]ews.Meeting{m}, offsets, until, 90, store)
+	if len(due) != 1 || !due[0].Snooze {
+		t.Fatalf("at T+5 want snooze after start, got %+v", due)
+	}
+}
+
+func TestCollectDueReminders_ChainedSnoozeAfterStart(t *testing.T) {
+	// Snooze at T+5, then snooze again → another follow-up at T+10.
+	start := time.Date(2026, 7, 23, 12, 0, 0, 0, time.Local)
+	offsets := []int{5, 0}
+	m := ews.Meeting{ID: "m1", Subject: "A", Start: start}
+
+	dir := t.TempDir()
+	store, err := state.Open(filepath.Join(dir, "shown.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = store.Mark("m1:5")
+	_ = store.Mark("m1:0")
+
+	until1 := start.Add(5 * time.Minute)
+	if err := store.SetSnooze("m1", until1); err != nil {
+		t.Fatal(err)
+	}
+	due := collectDueReminders([]ews.Meeting{m}, offsets, until1, 90, store)
+	if len(due) != 1 || !due[0].Snooze {
+		t.Fatalf("first snooze: %+v", due)
+	}
+	_ = store.Mark(due[0].Key)
+	_ = store.ClearSnooze("m1")
+
+	// Second snooze from the follow-up card
+	until2 := until1.Add(5 * time.Minute) // T+10
+	if err := store.SetSnooze("m1", until2); err != nil {
+		t.Fatal(err)
+	}
+	if err := markOffsetsCoveredBySnooze(store, "m1", start, offsets, until2); err != nil {
+		t.Fatal(err)
+	}
+
+	tPlus7 := start.Add(7 * time.Minute)
+	if due := collectDueReminders([]ews.Meeting{m}, offsets, tPlus7, 90, store); len(due) != 0 {
+		t.Fatalf("during second wait want 0, got %+v", due)
+	}
+
+	due = collectDueReminders([]ews.Meeting{m}, offsets, until2, 90, store)
+	if len(due) != 1 || !due[0].Snooze {
+		t.Fatalf("chained snooze at T+10: %+v", due)
+	}
+	if due[0].Key == state.SnoozeCycleKey("m1", until1) {
+		t.Fatal("second cycle must use a distinct key from the first")
+	}
+	if due[0].Key != state.SnoozeCycleKey("m1", until2) {
+		t.Fatalf("key: got %q want %q", due[0].Key, state.SnoozeCycleKey("m1", until2))
+	}
+}
+
+func TestCollectDueReminders_LegacySeenKeysStillWork(t *testing.T) {
+	// Old installs only have "id:offset" shown timestamps — no dismissed/snooze keys.
+	now := time.Date(2026, 7, 23, 12, 0, 0, 0, time.Local)
+	meetings := []ews.Meeting{
+		{ID: "m1", Subject: "A", Start: now.Add(5 * time.Minute)},
+	}
+	gate := mapGate{seen: map[string]bool{"m1:5": true}}
+	due := collectDueReminders(meetings, []int{5, 0}, now, 90, gate)
+	if len(due) != 0 {
+		t.Fatalf("legacy seen key should suppress offset 5, got %+v", due)
+	}
+}
+
 func TestFormatNotification_NoDuplicateCountdown(t *testing.T) {
 	start := time.Date(2026, 7, 27, 12, 20, 0, 0, time.Local)
 	m := ews.Meeting{
@@ -104,7 +341,7 @@ func TestFormatNotification_NoDuplicateCountdown(t *testing.T) {
 		Location: "https://trueconf.nexign.com/c/1",
 		JoinURL:  "https://trueconf.nexign.com/c/1",
 	}
-	title, body := formatNotification(m, 5)
+	title, body := formatNotification(m, 5, false)
 	if title != "Через 5 мин: Standup" {
 		t.Fatalf("title: %q", title)
 	}
@@ -112,8 +349,25 @@ func TestFormatNotification_NoDuplicateCountdown(t *testing.T) {
 	if body != wantBody {
 		t.Fatalf("body: %q want %q", body, wantBody)
 	}
-	title0, body0 := formatNotification(ews.Meeting{Subject: "X", Start: start}, 0)
+	title0, body0 := formatNotification(ews.Meeting{Subject: "X", Start: start}, 0, false)
 	if title0 != "Начало: X" || body0 != "12:20" {
 		t.Fatalf("offset 0: title=%q body=%q", title0, body0)
+	}
+	titleS, _ := formatNotification(m, -1, true)
+	if titleS != "Напоминание: Standup" {
+		t.Fatalf("snooze title: %q", titleS)
+	}
+}
+
+func TestMeetingIDFromSnoozeCycleKey(t *testing.T) {
+	id, ok := meetingIDFromSnoozeCycleKey("abc:snooze:1710000000")
+	if !ok || id != "abc" {
+		t.Fatalf("got %q %v", id, ok)
+	}
+	if _, ok := meetingIDFromSnoozeCycleKey("abc:5"); ok {
+		t.Fatal("offset key should not parse as snooze cycle")
+	}
+	if _, ok := meetingIDFromSnoozeCycleKey("abc:snooze"); ok {
+		t.Fatal("schedule key should not parse as snooze cycle")
 	}
 }

@@ -21,13 +21,19 @@ reminders:
   # How long to keep shown-notification records in the state file.
   # Every poll pass prunes entries older than this. Default: 24h.
   state_keep_hours: 24
+  # Re-fire delay after «Отложить» / skip_action_label. Default: 5.
+  snooze_minutes: 5
 
 notify:
   app_name: "Встречи Exchange"
   urgency: critical
   open_action_label: "Открыть ссылку"
-  skip_action_label: "Пропустить"
-  skip_all_action_label: "Пропустить все"
+  # «Отложить»: close and remind again after snooze_minutes (legacy key name).
+  skip_action_label: "Отложить"
+  # «Отложить все»: snooze current + all queued cards (legacy key name).
+  skip_all_action_label: "Отложить все"
+  # «Прекратить»: no more reminders for this meeting.
+  stop_action_label: "Прекратить"
   # Command to open join URLs; URL is appended as the last argument.
   # Example: "xterm -e xdg-open"
   open_url_cmd: xdg-open

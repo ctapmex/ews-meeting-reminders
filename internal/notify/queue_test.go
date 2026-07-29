@@ -65,6 +65,51 @@ func TestWaitIdleSeesQueuedAfterDequeue(t *testing.T) {
 	}
 }
 
+func TestDrainMeetingKeepsOtherMeetings(t *testing.T) {
+	var dropped []string
+	n := &Notifier{
+		inbox: make(chan Item, 128),
+		stop:  make(chan struct{}),
+		opts: Options{
+			OnDropped: func(key string) { dropped = append(dropped, key) },
+		},
+	}
+	// Simulate: while m1@5 banner is open, poll enqueued m1@0; m2 and m3 wait too.
+	for _, it := range []Item{
+		{MeetingID: "m1", Key: "m1:0", Title: "m1-0"},
+		{MeetingID: "m2", Key: "m2:5", Title: "m2"},
+		{MeetingID: "m1", Key: "m1:extra", Title: "m1-extra"},
+		{MeetingID: "m3", Key: "m3:5", Title: "m3"},
+	} {
+		n.queued.Add(1)
+		n.inbox <- it
+	}
+
+	got := n.drainMeeting("m1")
+	if got != 2 {
+		t.Fatalf("dropped count: got %d want 2", got)
+	}
+	if len(dropped) != 2 || dropped[0] != "m1:0" || dropped[1] != "m1:extra" {
+		t.Fatalf("OnDropped keys: %v", dropped)
+	}
+	if n.queued.Load() != 2 {
+		t.Fatalf("queued: got %d want 2", n.queued.Load())
+	}
+
+	var left []string
+	for range 2 {
+		left = append(left, (<-n.inbox).MeetingID)
+	}
+	if left[0] != "m2" || left[1] != "m3" {
+		t.Fatalf("remaining inbox: %v", left)
+	}
+	select {
+	case it := <-n.inbox:
+		t.Fatalf("inbox should be empty, got %+v", it)
+	default:
+	}
+}
+
 func TestSplitOpenCmd(t *testing.T) {
 	cases := []struct {
 		in    string

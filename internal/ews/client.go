@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net/http"
 	"regexp"
 	"strings"
@@ -151,10 +152,7 @@ func (c *Client) fetchBodies(refs []itemRef) (map[string]string, error) {
 		if i > 0 {
 			c.httpClient.CloseIdleConnections()
 		}
-		end := i + getItemBatchSize
-		if end > len(refs) {
-			end = len(refs)
-		}
+		end := min(i+getItemBatchSize, len(refs))
 		raw, err := c.doSOAP("GetItem", buildGetItem(refs[i:end]), false)
 		if err != nil {
 			return nil, err
@@ -163,9 +161,7 @@ func (c *Client) fetchBodies(refs []itemRef) (map[string]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		for id, body := range part {
-			out[id] = body
-		}
+		maps.Copy(out, part)
 	}
 	return out, nil
 }

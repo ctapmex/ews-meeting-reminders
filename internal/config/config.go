@@ -24,8 +24,10 @@ const (
 	DefaultAppName            = "Встречи Exchange"
 	DefaultUrgency            = "critical"
 	DefaultOpenActionLabel    = "Открыть ссылку"
-	DefaultSkipActionLabel    = "Пропустить"
-	DefaultSkipAllActionLabel = "Пропустить все"
+	DefaultSkipActionLabel    = "Отложить" // snooze; YAML key stays skip_action_label
+	DefaultSkipAllActionLabel = "Отложить все"
+	DefaultStopActionLabel    = "Прекратить"
+	DefaultSnoozeMinutes      = 5
 	DefaultOpenURLCmd         = "xdg-open"
 )
 
@@ -53,11 +55,13 @@ type Settings struct {
 	LookaheadHours       int
 	GraceAfterSeconds    int
 	StateKeepHours       int
+	SnoozeMinutes        int
 	AppName              string
 	Urgency              string
 	OpenActionLabel      string
-	SkipActionLabel      string
-	SkipAllActionLabel   string
+	SkipActionLabel      string // label for snooze action (legacy key name)
+	SkipAllActionLabel   string // label for snooze-all action (legacy key name)
+	StopActionLabel      string
 	OpenURLCmd           string
 	JoinHosts            []string
 }
@@ -78,13 +82,15 @@ type fileConfig struct {
 		LookaheadHours       int      `yaml:"lookahead_hours"`
 		GraceAfterSeconds    int      `yaml:"grace_after_seconds"`
 		StateKeepHours       int      `yaml:"state_keep_hours"`
+		SnoozeMinutes        int      `yaml:"snooze_minutes"`
 	} `yaml:"reminders"`
 	Notify struct {
 		AppName            string   `yaml:"app_name"`
 		Urgency            string   `yaml:"urgency"`
 		OpenActionLabel    string   `yaml:"open_action_label"`
-		SkipActionLabel    string   `yaml:"skip_action_label"`
-		SkipAllActionLabel string   `yaml:"skip_all_action_label"`
+		SkipActionLabel    string   `yaml:"skip_action_label"`     // snooze button
+		SkipAllActionLabel string   `yaml:"skip_all_action_label"` // snooze-all button
+		StopActionLabel    string   `yaml:"stop_action_label"`
 		OpenURLCmd         string   `yaml:"open_url_cmd"`
 		JoinHosts          []string `yaml:"join_hosts"`
 	} `yaml:"notify"`
@@ -148,11 +154,13 @@ func defaultNotifySettings() *Settings {
 		LookaheadHours:       DefaultLookaheadHours,
 		GraceAfterSeconds:    DefaultGraceAfterSeconds,
 		StateKeepHours:       DefaultStateKeepHours,
+		SnoozeMinutes:        DefaultSnoozeMinutes,
 		AppName:              DefaultAppName,
 		Urgency:              DefaultUrgency,
 		OpenActionLabel:      DefaultOpenActionLabel,
 		SkipActionLabel:      DefaultSkipActionLabel,
 		SkipAllActionLabel:   DefaultSkipAllActionLabel,
+		StopActionLabel:      DefaultStopActionLabel,
 		OpenURLCmd:           DefaultOpenURLCmd,
 		JoinHosts:            append([]string(nil), DefaultJoinHosts...),
 	}
@@ -233,6 +241,10 @@ func loadFile(path string) (*Settings, error) {
 	if stateKeep <= 0 {
 		stateKeep = DefaultStateKeepHours
 	}
+	snoozeMin := raw.Reminders.SnoozeMinutes
+	if snoozeMin <= 0 {
+		snoozeMin = DefaultSnoozeMinutes
+	}
 	appName := raw.Notify.AppName
 	if appName == "" {
 		appName = DefaultAppName
@@ -252,6 +264,10 @@ func loadFile(path string) (*Settings, error) {
 	skipAllLabel := raw.Notify.SkipAllActionLabel
 	if skipAllLabel == "" {
 		skipAllLabel = DefaultSkipAllActionLabel
+	}
+	stopLabel := raw.Notify.StopActionLabel
+	if stopLabel == "" {
+		stopLabel = DefaultStopActionLabel
 	}
 	openURLCmd := strings.TrimSpace(raw.Notify.OpenURLCmd)
 	if openURLCmd == "" {
@@ -275,11 +291,13 @@ func loadFile(path string) (*Settings, error) {
 		LookaheadHours:       lookahead,
 		GraceAfterSeconds:    grace,
 		StateKeepHours:       stateKeep,
+		SnoozeMinutes:        snoozeMin,
 		AppName:              appName,
 		Urgency:              urgency,
 		OpenActionLabel:      openLabel,
 		SkipActionLabel:      skipLabel,
 		SkipAllActionLabel:   skipAllLabel,
+		StopActionLabel:      stopLabel,
 		OpenURLCmd:           openURLCmd,
 		JoinHosts:            hosts,
 	}, nil
