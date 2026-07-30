@@ -21,7 +21,9 @@ reminders:
   # How long to keep shown-notification records in the state file.
   # Every poll pass prunes entries older than this. Default: 24h.
   state_keep_hours: 24
-  # Re-fire delay after «Отложить» / skip_action_label. Default: 5.
+  # Re-fire delay after «Отложить» when no later offsets remain before start.
+  # If an unfired offsets_minutes lies between now and start, snooze to that time instead.
+  # If less time remains until start than this value (and no later offsets), re-fire at start.
   snooze_minutes: 5
 
 notify:

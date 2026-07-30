@@ -335,14 +335,16 @@ func notifyOptions(cfg *config.Settings, store *state.Store) notify.Options {
 			}
 		}
 		opts.OnSnooze = func(meetingID string, start time.Time) {
-			until := time.Now().Add(snoozeFor)
+			now := time.Now()
+			until := computeSnoozeUntil(now, start, snoozeFor, cfg.OffsetsMinutes, func(offset int) bool {
+				return store.Seen(fmt.Sprintf("%s:%d", meetingID, offset))
+			})
 			if err := store.SetSnooze(meetingID, until); err != nil {
 				log.Printf("state snooze: %v", err)
 				return
 			}
 			// Consume schedule offsets that would fire at or before the snooze
-			// re-fire time, so e.g. snooze from T-10 for 5m yields one card at
-			// T-5 — not also the offsets at T-8 and T-5.
+			// re-fire time, so the follow-up does not double with those offsets.
 			if !start.IsZero() {
 				if err := markOffsetsCoveredBySnooze(store, meetingID, start, cfg.OffsetsMinutes, until); err != nil {
 					log.Printf("state mark covered offsets: %v", err)
@@ -359,6 +361,50 @@ func notifyOptions(cfg *config.Settings, store *state.Store) notify.Options {
 		}
 	}
 	return opts
+}
+
+// computeSnoozeUntil returns when a snoozed reminder should re-fire.
+//
+// Priority:
+//  1. If there is a still-unseen offsets_minutes fire time strictly after now
+//     and at or before meeting start — snooze until the soonest such time.
+//  2. Else if the meeting has not started and less than snoozeFor remains —
+//     clamp to meeting start.
+//  3. Else now + snoozeFor (including after the meeting has started).
+func computeSnoozeUntil(now, start time.Time, snoozeFor time.Duration, offsets []int, offsetSeen func(offset int) bool) time.Time {
+	if !start.IsZero() {
+		if next, ok := nextOffsetFireAt(now, start, offsets, offsetSeen); ok {
+			return next
+		}
+	}
+	until := now.Add(snoozeFor)
+	if start.IsZero() {
+		return until
+	}
+	if start.After(now) && start.Before(until) {
+		return start
+	}
+	return until
+}
+
+// nextOffsetFireAt finds the earliest unseen offset fire moment in (now, start].
+func nextOffsetFireAt(now, start time.Time, offsets []int, offsetSeen func(offset int) bool) (time.Time, bool) {
+	var best time.Time
+	found := false
+	for _, offset := range offsets {
+		if offsetSeen != nil && offsetSeen(offset) {
+			continue
+		}
+		fireAt := start.Add(-time.Duration(offset) * time.Minute)
+		if !fireAt.After(now) || fireAt.After(start) {
+			continue
+		}
+		if !found || fireAt.Before(best) {
+			best = fireAt
+			found = true
+		}
+	}
+	return best, found
 }
 
 // markOffsetsCoveredBySnooze marks offset keys whose fire moment

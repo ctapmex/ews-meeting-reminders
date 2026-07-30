@@ -152,24 +152,27 @@ func TestCollectDueReminders_ExpiredSnoozeFiresOnce(t *testing.T) {
 	}
 }
 
-func TestCollectDueReminders_SnoozeFrom10DoesNotDoubleAt5(t *testing.T) {
-	// offsets [10,8,5,0], snooze 5m from the T-10 card:
-	//  - while waiting: no T-8
-	//  - at T-5: only the snooze follow-up (offsets 10/8/5 already marked covered)
-	//  - later T-0 still available
+func TestCollectDueReminders_SnoozeFrom10GoesToNextOffset(t *testing.T) {
+	// offsets [10,8,5,0]: snooze on the T-10 card → until next unseen offset (T-8),
+	// not snooze_minutes (which would be T-5).
 	start := time.Date(2026, 7, 23, 12, 10, 0, 0, time.Local)
 	offsets := []int{10, 8, 5, 0}
 	m := ews.Meeting{ID: "m1", Subject: "A", Start: start}
 
 	t10 := start.Add(-10 * time.Minute)
-	until := t10.Add(5 * time.Minute) // T-5
+	until := computeSnoozeUntil(t10, start, 5*time.Minute, offsets, func(o int) bool {
+		return o == 10
+	})
+	t8 := start.Add(-8 * time.Minute)
+	if !until.Equal(t8) {
+		t.Fatalf("until: got %v want T-8 %v", until, t8)
+	}
 
 	dir := t.TempDir()
 	store, err := state.Open(filepath.Join(dir, "shown.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Simulate: offset 10 was shown, user snoozed → covered offsets marked.
 	if err := store.Mark("m1:10"); err != nil {
 		t.Fatal(err)
 	}
@@ -180,32 +183,32 @@ func TestCollectDueReminders_SnoozeFrom10DoesNotDoubleAt5(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// During wait (T-8): nothing
-	t8 := start.Add(-8 * time.Minute)
-	if due := collectDueReminders([]ews.Meeting{m}, offsets, t8, 90, store); len(due) != 0 {
-		t.Fatalf("at T-8 want 0, got %+v", due)
+	// During wait before T-8: nothing
+	if due := collectDueReminders([]ews.Meeting{m}, offsets, t8.Add(-time.Minute), 90, store); len(due) != 0 {
+		t.Fatalf("before T-8 want 0, got %+v", due)
 	}
 
-	// At T-5: only snooze follow-up
-	t5 := until
-	due := collectDueReminders([]ews.Meeting{m}, offsets, t5, 90, store)
+	// At T-8: snooze follow-up only (offset 8 covered)
+	due := collectDueReminders([]ews.Meeting{m}, offsets, t8, 90, store)
 	if len(due) != 1 || !due[0].Snooze {
-		t.Fatalf("at T-5 want one snooze, got %+v", due)
+		t.Fatalf("at T-8 want one snooze, got %+v", due)
 	}
-
-	// After snooze delivered + cleared: no immediate offset-5 duplicate
 	if err := store.Mark(due[0].Key); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.ClearSnooze("m1"); err != nil {
 		t.Fatal(err)
 	}
+
+	// Later offset 5 still fires
+	t5 := start.Add(-5 * time.Minute)
 	due = collectDueReminders([]ews.Meeting{m}, offsets, t5, 90, store)
-	if len(due) != 0 {
-		t.Fatalf("after snooze delivered want 0 at T-5, got %+v", due)
+	if len(due) != 1 || due[0].Offset != 5 {
+		t.Fatalf("at T-5 want offset 5, got %+v", due)
 	}
 
-	// At start: offset 0 still fires
+	// At start: offset 0
+	_ = store.Mark("m1:5")
 	due = collectDueReminders([]ews.Meeting{m}, offsets, start, 90, store)
 	if len(due) != 1 || due[0].Offset != 0 {
 		t.Fatalf("at start want offset 0, got %+v", due)
@@ -356,6 +359,111 @@ func TestFormatNotification_NoDuplicateCountdown(t *testing.T) {
 	titleS, _ := formatNotification(m, -1, true)
 	if titleS != "Напоминание: Standup" {
 		t.Fatalf("snooze title: %q", titleS)
+	}
+}
+
+func TestComputeSnoozeUntil(t *testing.T) {
+	snoozeFor := 5 * time.Minute
+	now := time.Date(2026, 7, 23, 12, 0, 0, 0, time.Local)
+	noneSeen := func(int) bool { return false }
+
+	t.Run("next unseen offset wins over snooze_minutes", func(t *testing.T) {
+		start := now.Add(10 * time.Minute)
+		offsets := []int{10, 8, 5, 0}
+		got := computeSnoozeUntil(now, start, snoozeFor, offsets, func(o int) bool {
+			return o == 10 // just shown
+		})
+		want := start.Add(-8 * time.Minute)
+		if !got.Equal(want) {
+			t.Fatalf("got %v want next offset %v", got, want)
+		}
+	})
+
+	t.Run("no remaining offsets uses full snooze when enough time", func(t *testing.T) {
+		// Only offset was 10, already seen; now at T-9 with start in 9m — no future offsets.
+		start := now.Add(9 * time.Minute)
+		got := computeSnoozeUntil(now, start, snoozeFor, []int{10}, func(o int) bool {
+			return true
+		})
+		want := now.Add(snoozeFor)
+		if !got.Equal(want) {
+			t.Fatalf("got %v want %v", got, want)
+		}
+	})
+
+	t.Run("no remaining offsets clamps to start when less than snooze", func(t *testing.T) {
+		start := now.Add(3 * time.Minute)
+		got := computeSnoozeUntil(now, start, snoozeFor, []int{10, 5}, func(o int) bool {
+			return true
+		})
+		if !got.Equal(start) {
+			t.Fatalf("got %v want start %v", got, start)
+		}
+	})
+
+	t.Run("last offset zero is next when earlier seen", func(t *testing.T) {
+		start := now.Add(3 * time.Minute)
+		got := computeSnoozeUntil(now, start, snoozeFor, []int{5, 0}, func(o int) bool {
+			return o == 5
+		})
+		if !got.Equal(start) {
+			t.Fatalf("got %v want start %v", got, start)
+		}
+	})
+
+	t.Run("after start keeps full snooze", func(t *testing.T) {
+		start := now.Add(-2 * time.Minute)
+		got := computeSnoozeUntil(now, start, snoozeFor, []int{5, 0}, noneSeen)
+		want := now.Add(snoozeFor)
+		if !got.Equal(want) {
+			t.Fatalf("got %v want %v", got, want)
+		}
+	})
+
+	t.Run("zero start keeps full snooze", func(t *testing.T) {
+		got := computeSnoozeUntil(now, time.Time{}, snoozeFor, []int{5, 0}, noneSeen)
+		want := now.Add(snoozeFor)
+		if !got.Equal(want) {
+			t.Fatalf("got %v want %v", got, want)
+		}
+	})
+}
+
+func TestCollectDueReminders_SnoozeClampedToStart(t *testing.T) {
+	// Snooze at T-3: next unseen offset is 0 → until = start.
+	start := time.Date(2026, 7, 23, 12, 0, 0, 0, time.Local)
+	now := start.Add(-3 * time.Minute)
+	offsets := []int{5, 0}
+	until := computeSnoozeUntil(now, start, 5*time.Minute, offsets, func(o int) bool {
+		return o == 5
+	})
+	if !until.Equal(start) {
+		t.Fatalf("until: got %v want %v", until, start)
+	}
+
+	m := ews.Meeting{ID: "m1", Subject: "A", Start: start}
+	dir := t.TempDir()
+	store, err := state.Open(filepath.Join(dir, "shown.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = store.Mark("m1:5")
+	if err := store.SetSnooze("m1", until); err != nil {
+		t.Fatal(err)
+	}
+	if err := markOffsetsCoveredBySnooze(store, "m1", start, offsets, until); err != nil {
+		t.Fatal(err)
+	}
+
+	// While waiting (T-1): nothing
+	if due := collectDueReminders([]ews.Meeting{m}, offsets, start.Add(-time.Minute), 90, store); len(due) != 0 {
+		t.Fatalf("during wait want 0, got %+v", due)
+	}
+
+	// At start: snooze follow-up (offset 0 covered, not a second card)
+	due := collectDueReminders([]ews.Meeting{m}, offsets, start, 90, store)
+	if len(due) != 1 || !due[0].Snooze {
+		t.Fatalf("at start want one snooze, got %+v", due)
 	}
 }
 
