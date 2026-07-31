@@ -62,7 +62,8 @@ func Run(opts Options) error {
 		cfg.Email, cfg.OffsetsMinutes, cfg.PollSeconds, cfg.SnoozeMinutes)
 
 	if opts.Once {
-		fired, err := processOnce(client, cfg, store, n)
+		var known meetingMemory
+		fired, err := processOnce(client, cfg, store, n, &known)
 		if err != nil {
 			return err
 		}
@@ -73,14 +74,27 @@ func Run(opts Options) error {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 
+	var known meetingMemory
+	hasOffset0 := false
+	for _, o := range cfg.OffsetsMinutes {
+		if o == 0 {
+			hasOffset0 = true
+			break
+		}
+	}
 	for {
 		if err := store.Prune(time.Duration(cfg.StateKeepHours) * time.Hour); err != nil {
 			log.Printf("state prune: %v", err)
 		}
-		if _, err := processOnce(client, cfg, store, n); err != nil {
+		if _, err := processOnce(client, cfg, store, n, &known); err != nil {
 			log.Printf("ews fetch: %v", err)
 		}
-		timer := time.NewTimer(time.Duration(cfg.PollSeconds) * time.Second)
+		wait := time.Duration(cfg.PollSeconds) * time.Second
+		if d := nextOffset0Wait(time.Now(), wait, &known, hasOffset0, store); d > 0 {
+			wait = d
+			log.Printf("next poll in %s (aligned to offset 0)", wait.Round(time.Millisecond))
+		}
+		timer := time.NewTimer(wait)
 		select {
 		case <-stop:
 			timer.Stop()
@@ -193,12 +207,15 @@ type reminderGate interface {
 }
 
 // collectDueReminders returns reminders that should fire for the given meetings/now.
+// known reports meetings seen in a previous EWS poll; for those, offset 0 uses the
+// start of the local minute (seconds=0) as the fire threshold.
 func collectDueReminders(
 	meetings []ews.Meeting,
 	offsets []int,
 	now time.Time,
 	graceAfter int,
 	gate reminderGate,
+	known func(id string) bool,
 ) []dueReminder {
 	var out []dueReminder
 	for _, m := range meetings {
@@ -230,7 +247,11 @@ func collectDueReminders(
 			if gate != nil && gate.Seen(key) {
 				continue
 			}
-			if !shouldFire(m.Start, offset, now, graceAfter) {
+			fireStart := m.Start
+			if offset == 0 && known != nil && known(m.ID) {
+				fireStart = truncateToLocalMinute(m.Start)
+			}
+			if !shouldFire(fireStart, offset, now, graceAfter) {
 				continue
 			}
 			out = append(out, dueReminder{Meeting: m, Offset: offset, Key: key})
@@ -239,46 +260,123 @@ func collectDueReminders(
 	return out
 }
 
-func processOnce(client *ews.Client, cfg *config.Settings, store *state.Store, n *notify.Notifier) (int, error) {
+// processOnce fetches meetings, enqueues due reminders, and refreshes known-meeting
+// memory from this poll (so the next poll can align offset 0 to the minute).
+func processOnce(client *ews.Client, cfg *config.Settings, store *state.Store, n *notify.Notifier, known *meetingMemory) (int, error) {
 	now := time.Now()
 	end := now.Add(time.Duration(cfg.LookaheadHours) * time.Hour)
 	meetings, err := client.CalendarView(now, end)
 	if err != nil {
 		return 0, err
 	}
-	due := collectDueReminders(meetings, cfg.OffsetsMinutes, now, cfg.GraceAfterSeconds, store)
-	if len(due) == 0 {
-		return 0, nil
+	var knownFn func(string) bool
+	if known != nil {
+		knownFn = known.Known
 	}
-
-	items := make([]notify.Item, 0, len(due))
-	for _, d := range due {
-		title, body := formatNotification(d.Meeting, d.Offset, d.Snooze)
-		items = append(items, notify.Item{
-			Title:     title,
-			Body:      body,
-			URL:       d.Meeting.JoinURL,
-			Key:       d.Key,
-			MeetingID: d.Meeting.ID,
-			Start:     d.Meeting.Start,
-		})
-		if d.Snooze {
-			log.Printf("queued snooze %q url=%q", d.Meeting.Subject, d.Meeting.JoinURL)
-		} else {
-			log.Printf("queued %q offset=%d url=%q", d.Meeting.Subject, d.Offset, d.Meeting.JoinURL)
+	due := collectDueReminders(meetings, cfg.OffsetsMinutes, now, cfg.GraceAfterSeconds, store, knownFn)
+	if len(due) > 0 {
+		items := make([]notify.Item, 0, len(due))
+		for _, d := range due {
+			title, body := formatNotification(d.Meeting, d.Offset, d.Snooze)
+			items = append(items, notify.Item{
+				Title:     title,
+				Body:      body,
+				URL:       d.Meeting.JoinURL,
+				Key:       d.Key,
+				MeetingID: d.Meeting.ID,
+				Start:     d.Meeting.Start,
+			})
+			if d.Snooze {
+				log.Printf("queued snooze %q url=%q", d.Meeting.Subject, d.Meeting.JoinURL)
+			} else {
+				log.Printf("queued %q offset=%d url=%q", d.Meeting.Subject, d.Offset, d.Meeting.JoinURL)
+			}
 		}
+		n.Enqueue(items)
 	}
-
-	// Single global queue: if a banner is already up, new meetings wait in line.
-	// Items are marked as shown by the notifier when it actually presents them.
-	n.Enqueue(items)
+	if known != nil {
+		known.Refresh(meetings)
+	}
 	return len(due), nil
+}
+
+// nextOffset0Wait returns time until the soonest known meeting's offset-0 minute
+// boundary, or 0 if none is sooner than maxWait.
+func nextOffset0Wait(now time.Time, maxWait time.Duration, known *meetingMemory, hasOffset0 bool, store *state.Store) time.Duration {
+	if !hasOffset0 || known == nil {
+		return 0
+	}
+	fireAt, ok := known.NextOffset0FireAt(now, store)
+	if !ok {
+		return 0
+	}
+	d := fireAt.Sub(now)
+	if d > 0 && d < maxWait {
+		return d
+	}
+	return 0
 }
 
 func shouldFire(start time.Time, offsetMin int, now time.Time, graceAfter int) bool {
 	remaining := start.Sub(now).Seconds()
 	threshold := float64(offsetMin * 60)
 	return remaining > (threshold-float64(graceAfter)) && remaining <= threshold
+}
+
+// truncateToLocalMinute returns t with seconds and nanoseconds cleared in t's location.
+func truncateToLocalMinute(t time.Time) time.Time {
+	return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), 0, 0, t.Location())
+}
+
+// meetingMemory tracks starts from the previous EWS poll so offset 0 can fire on
+// the minute for meetings we already know about.
+type meetingMemory struct {
+	starts map[string]time.Time
+}
+
+func (m *meetingMemory) Known(id string) bool {
+	if m == nil || m.starts == nil {
+		return false
+	}
+	_, ok := m.starts[id]
+	return ok
+}
+
+func (m *meetingMemory) Refresh(meetings []ews.Meeting) {
+	next := make(map[string]time.Time, len(meetings))
+	for _, mtg := range meetings {
+		next[mtg.ID] = mtg.Start
+	}
+	m.starts = next
+}
+
+// NextOffset0FireAt returns the soonest future minute-aligned start among known
+// meetings that still need an offset-0 reminder.
+func (m *meetingMemory) NextOffset0FireAt(now time.Time, store *state.Store) (time.Time, bool) {
+	if m == nil || len(m.starts) == 0 {
+		return time.Time{}, false
+	}
+	var best time.Time
+	found := false
+	for id, start := range m.starts {
+		if store != nil {
+			if store.IsDismissed(id) || store.Seen(fmt.Sprintf("%s:0", id)) {
+				continue
+			}
+			if until, ok := store.SnoozeUntil(id); ok && now.Before(until) {
+				continue
+			}
+		}
+		fireAt := truncateToLocalMinute(start)
+		if !fireAt.After(now) {
+			continue
+		}
+		if !found || fireAt.Before(best) {
+			best = fireAt
+			found = true
+		}
+	}
+	return best, found
 }
 
 // formatNotification builds one reminder card: title carries the offset label,

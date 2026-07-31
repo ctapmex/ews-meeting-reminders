@@ -28,7 +28,7 @@ func TestCollectDueReminders_TwoSimultaneousMeetings(t *testing.T) {
 			Response: "Organizer",
 		},
 	}
-	due := collectDueReminders(meetings, []int{5, 0}, now, 90, nil)
+	due := collectDueReminders(meetings, []int{5, 0}, now, 90, nil, nil)
 	if len(due) != 2 {
 		t.Fatalf("want 2 due reminders (offset 5 for each), got %d: %+v", len(due), due)
 	}
@@ -52,7 +52,7 @@ func TestCollectDueReminders_ThreeSimultaneousMeetings(t *testing.T) {
 		{ID: "b", Subject: "B", Start: start, JoinURL: "https://trueconf.x.com/c/2"},
 		{ID: "c", Subject: "C", Start: start, JoinURL: "https://zoom.us/j/3"},
 	}
-	due := collectDueReminders(meetings, []int{5, 0}, now, 90, nil)
+	due := collectDueReminders(meetings, []int{5, 0}, now, 90, nil, nil)
 	// At start: offset 0 fires for all three; offset 5 also matches remaining<=300
 	// (remaining=0 <= 300 and > 300-90=210? 0 > 210 is false) so only offset 0.
 	if len(due) != 3 {
@@ -86,7 +86,7 @@ func TestCollectDueReminders_SkipsAlreadySeen(t *testing.T) {
 		{ID: "m3", Subject: "C", Start: now.Add(5 * time.Minute)},
 	}
 	gate := mapGate{seen: map[string]bool{"m1:5": true}}
-	due := collectDueReminders(meetings, []int{5}, now, 90, gate)
+	due := collectDueReminders(meetings, []int{5}, now, 90, gate, nil)
 	if len(due) != 2 {
 		t.Fatalf("want 2 (m2,m3), got %d: %+v", len(due), due)
 	}
@@ -104,7 +104,7 @@ func TestCollectDueReminders_OnlyOneInWindowAmongThree(t *testing.T) {
 		{ID: "later", Subject: "Later", Start: now.Add(30 * time.Minute)},
 		{ID: "far", Subject: "Far", Start: now.Add(2 * time.Hour)},
 	}
-	due := collectDueReminders(meetings, []int{5, 0}, now, 90, nil)
+	due := collectDueReminders(meetings, []int{5, 0}, now, 90, nil, nil)
 	if len(due) != 1 || due[0].Meeting.ID != "soon" || due[0].Offset != 5 {
 		t.Fatalf("want only soon@5, got %+v", due)
 	}
@@ -117,7 +117,7 @@ func TestCollectDueReminders_DismissedSuppressesAll(t *testing.T) {
 		{ID: "m2", Subject: "B", Start: now.Add(5 * time.Minute)},
 	}
 	gate := mapGate{dismissed: map[string]bool{"m1": true}}
-	due := collectDueReminders(meetings, []int{5, 0}, now, 90, gate)
+	due := collectDueReminders(meetings, []int{5, 0}, now, 90, gate, nil)
 	if len(due) != 1 || due[0].Meeting.ID != "m2" {
 		t.Fatalf("want only m2, got %+v", due)
 	}
@@ -129,7 +129,7 @@ func TestCollectDueReminders_ActiveSnoozeSuppressesOffsets(t *testing.T) {
 		{ID: "m1", Subject: "A", Start: now.Add(5 * time.Minute)},
 	}
 	gate := mapGate{snoozeUntil: map[string]time.Time{"m1": now.Add(3 * time.Minute)}}
-	due := collectDueReminders(meetings, []int{5, 0}, now, 90, gate)
+	due := collectDueReminders(meetings, []int{5, 0}, now, 90, gate, nil)
 	if len(due) != 0 {
 		t.Fatalf("want no reminders while snoozed, got %+v", due)
 	}
@@ -142,7 +142,7 @@ func TestCollectDueReminders_ExpiredSnoozeFiresOnce(t *testing.T) {
 		{ID: "m1", Subject: "A", Start: now.Add(4 * time.Minute)},
 	}
 	gate := mapGate{snoozeUntil: map[string]time.Time{"m1": until}}
-	due := collectDueReminders(meetings, []int{5, 0}, now, 90, gate)
+	due := collectDueReminders(meetings, []int{5, 0}, now, 90, gate, nil)
 	if len(due) != 1 || !due[0].Snooze {
 		t.Fatalf("want one snooze reminder, got %+v", due)
 	}
@@ -184,12 +184,12 @@ func TestCollectDueReminders_SnoozeFrom10GoesToNextOffset(t *testing.T) {
 	}
 
 	// During wait before T-8: nothing
-	if due := collectDueReminders([]ews.Meeting{m}, offsets, t8.Add(-time.Minute), 90, store); len(due) != 0 {
+	if due := collectDueReminders([]ews.Meeting{m}, offsets, t8.Add(-time.Minute), 90, store, nil); len(due) != 0 {
 		t.Fatalf("before T-8 want 0, got %+v", due)
 	}
 
 	// At T-8: snooze follow-up only (offset 8 covered)
-	due := collectDueReminders([]ews.Meeting{m}, offsets, t8, 90, store)
+	due := collectDueReminders([]ews.Meeting{m}, offsets, t8, 90, store, nil)
 	if len(due) != 1 || !due[0].Snooze {
 		t.Fatalf("at T-8 want one snooze, got %+v", due)
 	}
@@ -202,14 +202,14 @@ func TestCollectDueReminders_SnoozeFrom10GoesToNextOffset(t *testing.T) {
 
 	// Later offset 5 still fires
 	t5 := start.Add(-5 * time.Minute)
-	due = collectDueReminders([]ews.Meeting{m}, offsets, t5, 90, store)
+	due = collectDueReminders([]ews.Meeting{m}, offsets, t5, 90, store, nil)
 	if len(due) != 1 || due[0].Offset != 5 {
 		t.Fatalf("at T-5 want offset 5, got %+v", due)
 	}
 
 	// At start: offset 0
 	_ = store.Mark("m1:5")
-	due = collectDueReminders([]ews.Meeting{m}, offsets, start, 90, store)
+	due = collectDueReminders([]ews.Meeting{m}, offsets, start, 90, store, nil)
 	if len(due) != 1 || due[0].Offset != 0 {
 		t.Fatalf("at start want offset 0, got %+v", due)
 	}
@@ -261,12 +261,12 @@ func TestCollectDueReminders_SnoozeAfterStartStillFires(t *testing.T) {
 
 	// While waiting past start: nothing
 	tPlus2 := start.Add(2 * time.Minute)
-	if due := collectDueReminders([]ews.Meeting{m}, offsets, tPlus2, 90, store); len(due) != 0 {
+	if due := collectDueReminders([]ews.Meeting{m}, offsets, tPlus2, 90, store, nil); len(due) != 0 {
 		t.Fatalf("at T+2 want 0, got %+v", due)
 	}
 
 	// At T+5: snooze follow-up even though meeting already started
-	due := collectDueReminders([]ews.Meeting{m}, offsets, until, 90, store)
+	due := collectDueReminders([]ews.Meeting{m}, offsets, until, 90, store, nil)
 	if len(due) != 1 || !due[0].Snooze {
 		t.Fatalf("at T+5 want snooze after start, got %+v", due)
 	}
@@ -290,7 +290,7 @@ func TestCollectDueReminders_ChainedSnoozeAfterStart(t *testing.T) {
 	if err := store.SetSnooze("m1", until1); err != nil {
 		t.Fatal(err)
 	}
-	due := collectDueReminders([]ews.Meeting{m}, offsets, until1, 90, store)
+	due := collectDueReminders([]ews.Meeting{m}, offsets, until1, 90, store, nil)
 	if len(due) != 1 || !due[0].Snooze {
 		t.Fatalf("first snooze: %+v", due)
 	}
@@ -307,11 +307,11 @@ func TestCollectDueReminders_ChainedSnoozeAfterStart(t *testing.T) {
 	}
 
 	tPlus7 := start.Add(7 * time.Minute)
-	if due := collectDueReminders([]ews.Meeting{m}, offsets, tPlus7, 90, store); len(due) != 0 {
+	if due := collectDueReminders([]ews.Meeting{m}, offsets, tPlus7, 90, store, nil); len(due) != 0 {
 		t.Fatalf("during second wait want 0, got %+v", due)
 	}
 
-	due = collectDueReminders([]ews.Meeting{m}, offsets, until2, 90, store)
+	due = collectDueReminders([]ews.Meeting{m}, offsets, until2, 90, store, nil)
 	if len(due) != 1 || !due[0].Snooze {
 		t.Fatalf("chained snooze at T+10: %+v", due)
 	}
@@ -330,7 +330,7 @@ func TestCollectDueReminders_LegacySeenKeysStillWork(t *testing.T) {
 		{ID: "m1", Subject: "A", Start: now.Add(5 * time.Minute)},
 	}
 	gate := mapGate{seen: map[string]bool{"m1:5": true}}
-	due := collectDueReminders(meetings, []int{5, 0}, now, 90, gate)
+	due := collectDueReminders(meetings, []int{5, 0}, now, 90, gate, nil)
 	if len(due) != 0 {
 		t.Fatalf("legacy seen key should suppress offset 5, got %+v", due)
 	}
@@ -456,14 +456,68 @@ func TestCollectDueReminders_SnoozeClampedToStart(t *testing.T) {
 	}
 
 	// While waiting (T-1): nothing
-	if due := collectDueReminders([]ews.Meeting{m}, offsets, start.Add(-time.Minute), 90, store); len(due) != 0 {
+	if due := collectDueReminders([]ews.Meeting{m}, offsets, start.Add(-time.Minute), 90, store, nil); len(due) != 0 {
 		t.Fatalf("during wait want 0, got %+v", due)
 	}
 
 	// At start: snooze follow-up (offset 0 covered, not a second card)
-	due := collectDueReminders([]ews.Meeting{m}, offsets, start, 90, store)
+	due := collectDueReminders([]ews.Meeting{m}, offsets, start, 90, store, nil)
 	if len(due) != 1 || !due[0].Snooze {
 		t.Fatalf("at start want one snooze, got %+v", due)
+	}
+}
+
+func TestTruncateToLocalMinute(t *testing.T) {
+	in := time.Date(2026, 7, 23, 12, 30, 45, 123, time.Local)
+	got := truncateToLocalMinute(in)
+	want := time.Date(2026, 7, 23, 12, 30, 0, 0, time.Local)
+	if !got.Equal(want) {
+		t.Fatalf("got %v want %v", got, want)
+	}
+}
+
+func TestCollectDueReminders_KnownOffset0FiresAtMinuteStart(t *testing.T) {
+	// Meeting starts at 12:30:45; known from a previous poll → offset 0 at 12:30:00.
+	start := time.Date(2026, 7, 23, 12, 30, 45, 0, time.Local)
+	m := ews.Meeting{ID: "m1", Subject: "A", Start: start}
+	known := func(id string) bool { return id == "m1" }
+
+	atMinute := time.Date(2026, 7, 23, 12, 30, 0, 0, time.Local)
+	due := collectDueReminders([]ews.Meeting{m}, []int{5, 0}, atMinute, 90, nil, known)
+	if len(due) != 1 || due[0].Offset != 0 {
+		t.Fatalf("known at :00 want offset 0, got %+v", due)
+	}
+
+	// Same meeting first seen this poll (not known): not yet at start → no offset 0.
+	due = collectDueReminders([]ews.Meeting{m}, []int{5, 0}, atMinute, 90, nil, nil)
+	if len(due) != 0 {
+		t.Fatalf("unknown at :00 want 0, got %+v", due)
+	}
+
+	// Unknown fires at actual start.
+	due = collectDueReminders([]ews.Meeting{m}, []int{0}, start, 90, nil, nil)
+	if len(due) != 1 || due[0].Offset != 0 {
+		t.Fatalf("unknown at actual start want offset 0, got %+v", due)
+	}
+}
+
+func TestNextOffset0Wait(t *testing.T) {
+	now := time.Date(2026, 7, 23, 12, 29, 40, 0, time.Local)
+	start := time.Date(2026, 7, 23, 12, 30, 15, 0, time.Local)
+	var mem meetingMemory
+	mem.Refresh([]ews.Meeting{{ID: "m1", Start: start}})
+
+	maxWait := 30 * time.Second
+	d := nextOffset0Wait(now, maxWait, &mem, true, nil)
+	want := time.Date(2026, 7, 23, 12, 30, 0, 0, time.Local).Sub(now) // 20s
+	if d != want {
+		t.Fatalf("wait: got %v want %v", d, want)
+	}
+
+	// Already past minute start → no shortened wait
+	d = nextOffset0Wait(time.Date(2026, 7, 23, 12, 30, 5, 0, time.Local), maxWait, &mem, true, nil)
+	if d != 0 {
+		t.Fatalf("past minute want 0, got %v", d)
 	}
 }
 
