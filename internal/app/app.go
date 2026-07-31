@@ -52,7 +52,8 @@ func Run(opts Options) error {
 		return err
 	}
 
-	n, err := notify.New(notifyOptions(cfg, store))
+	reschedule := make(chan struct{}, 1)
+	n, err := notify.New(notifyOptions(cfg, store, reschedule))
 	if err != nil {
 		return err
 	}
@@ -90,9 +91,9 @@ func Run(opts Options) error {
 			log.Printf("ews fetch: %v", err)
 		}
 		wait := time.Duration(cfg.PollSeconds) * time.Second
-		if d := nextOffset0Wait(time.Now(), wait, &known, hasOffset0, store); d > 0 {
+		if d := nextPollWait(time.Now(), wait, &known, hasOffset0, store); d > 0 {
 			wait = d
-			log.Printf("next poll in %s (aligned to offset 0)", wait.Round(time.Millisecond))
+			log.Printf("next poll in %s (aligned wake)", wait.Round(time.Millisecond))
 		}
 		timer := time.NewTimer(wait)
 		select {
@@ -100,6 +101,11 @@ func Run(opts Options) error {
 			timer.Stop()
 			return nil
 		case <-timer.C:
+		case <-reschedule:
+			timer.Stop()
+			// Snooze/stop updated state while sleeping — re-enter loop to
+			// processOnce (cheap if nothing due) and recompute aligned wait.
+			log.Printf("poll reschedule requested")
 		}
 	}
 }
@@ -143,7 +149,7 @@ func RunTestNotify(opts TestNotifyOptions) error {
 	if err != nil {
 		return err
 	}
-	n, err := notify.New(notifyOptions(cfg, nil))
+	n, err := notify.New(notifyOptions(cfg, nil, nil))
 	if err != nil {
 		return err
 	}
@@ -300,21 +306,32 @@ func processOnce(client *ews.Client, cfg *config.Settings, store *state.Store, n
 	return len(due), nil
 }
 
-// nextOffset0Wait returns time until the soonest known meeting's offset-0 minute
-// boundary, or 0 if none is sooner than maxWait.
-func nextOffset0Wait(now time.Time, maxWait time.Duration, known *meetingMemory, hasOffset0 bool, store *state.Store) time.Duration {
-	if !hasOffset0 || known == nil {
+// nextPollWait returns a sleep shorter than maxWait when a known offset-0 minute
+// or a pending snooze is due sooner; otherwise 0 (use maxWait).
+func nextPollWait(now time.Time, maxWait time.Duration, known *meetingMemory, hasOffset0 bool, store *state.Store) time.Duration {
+	var best time.Duration
+	found := false
+	consider := func(fireAt time.Time) {
+		d := fireAt.Sub(now)
+		if d > 0 && d < maxWait && (!found || d < best) {
+			best = d
+			found = true
+		}
+	}
+	if hasOffset0 && known != nil {
+		if fireAt, ok := known.NextOffset0FireAt(now, store); ok {
+			consider(fireAt)
+		}
+	}
+	if store != nil {
+		if fireAt, ok := store.EarliestSnoozeUntil(now); ok {
+			consider(fireAt)
+		}
+	}
+	if !found {
 		return 0
 	}
-	fireAt, ok := known.NextOffset0FireAt(now, store)
-	if !ok {
-		return 0
-	}
-	d := fireAt.Sub(now)
-	if d > 0 && d < maxWait {
-		return d
-	}
-	return 0
+	return best
 }
 
 func shouldFire(start time.Time, offsetMin int, now time.Time, graceAfter int) bool {
@@ -402,7 +419,7 @@ func formatNotification(m ews.Meeting, offsetMin int, snooze bool) (title, body 
 	return title, body
 }
 
-func notifyOptions(cfg *config.Settings, store *state.Store) notify.Options {
+func notifyOptions(cfg *config.Settings, store *state.Store, reschedule chan<- struct{}) notify.Options {
 	opts := notify.Options{
 		AppName:            cfg.AppName,
 		Urgency:            cfg.Urgency,
@@ -412,6 +429,15 @@ func notifyOptions(cfg *config.Settings, store *state.Store) notify.Options {
 		StopActionLabel:    cfg.StopActionLabel,
 		OpenURLCmd:         cfg.OpenURLCmd,
 		WaitPerItem:        config.DefaultWaitPerItem,
+	}
+	requestReschedule := func() {
+		if reschedule == nil {
+			return
+		}
+		select {
+		case reschedule <- struct{}{}:
+		default:
+		}
 	}
 	if store != nil {
 		snoozeFor := time.Duration(cfg.SnoozeMinutes) * time.Minute
@@ -449,6 +475,7 @@ func notifyOptions(cfg *config.Settings, store *state.Store) notify.Options {
 				}
 			}
 			log.Printf("snoozed meeting=%s until %s", meetingID, until.Format(time.RFC3339))
+			requestReschedule()
 		}
 		opts.OnStop = func(meetingID string) {
 			if err := store.MarkDismissed(meetingID); err != nil {
@@ -456,6 +483,7 @@ func notifyOptions(cfg *config.Settings, store *state.Store) notify.Options {
 				return
 			}
 			log.Printf("stopped reminders for meeting=%s", meetingID)
+			requestReschedule()
 		}
 	}
 	return opts

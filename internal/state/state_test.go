@@ -54,6 +54,30 @@ func TestStore_DismissAndSnooze(t *testing.T) {
 	}
 }
 
+func TestStore_EarliestSnoozeUntil(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(filepath.Join(dir, "shown.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 31, 14, 25, 0, 0, time.Local)
+	early := now.Add(2 * time.Minute)
+	late := now.Add(10 * time.Minute)
+	if err := s.SetSnooze("m2", late); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSnooze("m1", early); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := s.EarliestSnoozeUntil(now)
+	if !ok || !got.Equal(early) {
+		t.Fatalf("got %v %v want %v", got, ok, early)
+	}
+	if _, ok := s.EarliestSnoozeUntil(late); ok {
+		t.Fatal("no snooze strictly after late")
+	}
+}
+
 func TestStore_PruneKeepsFutureSnooze(t *testing.T) {
 	dir := t.TempDir()
 	s, err := Open(filepath.Join(dir, "shown.json"))

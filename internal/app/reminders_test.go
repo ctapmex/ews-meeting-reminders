@@ -501,23 +501,46 @@ func TestCollectDueReminders_KnownOffset0FiresAtMinuteStart(t *testing.T) {
 	}
 }
 
-func TestNextOffset0Wait(t *testing.T) {
+func TestNextPollWait(t *testing.T) {
 	now := time.Date(2026, 7, 23, 12, 29, 40, 0, time.Local)
 	start := time.Date(2026, 7, 23, 12, 30, 15, 0, time.Local)
 	var mem meetingMemory
 	mem.Refresh([]ews.Meeting{{ID: "m1", Start: start}})
 
 	maxWait := 30 * time.Second
-	d := nextOffset0Wait(now, maxWait, &mem, true, nil)
+	d := nextPollWait(now, maxWait, &mem, true, nil)
 	want := time.Date(2026, 7, 23, 12, 30, 0, 0, time.Local).Sub(now) // 20s
 	if d != want {
-		t.Fatalf("wait: got %v want %v", d, want)
+		t.Fatalf("offset0 wait: got %v want %v", d, want)
 	}
 
 	// Already past minute start → no shortened wait
-	d = nextOffset0Wait(time.Date(2026, 7, 23, 12, 30, 5, 0, time.Local), maxWait, &mem, true, nil)
+	d = nextPollWait(time.Date(2026, 7, 23, 12, 30, 5, 0, time.Local), maxWait, &mem, true, nil)
 	if d != 0 {
 		t.Fatalf("past minute want 0, got %v", d)
+	}
+}
+
+func TestNextPollWait_SnoozeTakesPriority(t *testing.T) {
+	// Active snooze suppresses offset-0 wake for that meeting; snooze until must still wake us.
+	now := time.Date(2026, 7, 23, 12, 29, 40, 0, time.Local)
+	start := time.Date(2026, 7, 23, 12, 30, 0, 0, time.Local)
+	dir := t.TempDir()
+	store, err := state.Open(filepath.Join(dir, "shown.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mem meetingMemory
+	mem.Refresh([]ews.Meeting{{ID: "m1", Start: start}})
+	if err := store.SetSnooze("m1", start); err != nil {
+		t.Fatal(err)
+	}
+
+	maxWait := 60 * time.Second
+	d := nextPollWait(now, maxWait, &mem, true, store)
+	want := start.Sub(now) // 20s to snooze-until (== start)
+	if d != want {
+		t.Fatalf("snooze wait: got %v want %v", d, want)
 	}
 }
 

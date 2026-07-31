@@ -104,6 +104,28 @@ func (s *Store) SnoozeUntil(meetingID string) (time.Time, bool) {
 	return t, true
 }
 
+// EarliestSnoozeUntil returns the soonest pending snooze fire time strictly after after.
+func (s *Store) EarliestSnoozeUntil(after time.Time) (time.Time, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var best time.Time
+	found := false
+	for k, raw := range s.data {
+		if !isSnoozeScheduleKey(k) {
+			continue
+		}
+		t, err := time.Parse(time.RFC3339, raw)
+		if err != nil || !t.After(after) {
+			continue
+		}
+		if !found || t.Before(best) {
+			best = t
+			found = true
+		}
+	}
+	return best, found
+}
+
 // SetSnooze schedules a follow-up reminder at until.
 func (s *Store) SetSnooze(meetingID string, until time.Time) error {
 	s.mu.Lock()
